@@ -1448,7 +1448,7 @@ static void prox_lp_scan_mode(void *device_data)
 	mutex_lock(&ilits->touch_mutex);
 	input_info(true, ilits->dev, "%s: %d\n", __func__, sec->cmd_param[0]);
 
-	if (!ilits->prox_lp_scan_enabled) {
+	if (!ilits->prox_lp_scan_mode_enabled) {
 		input_err(true, ilits->dev, "%s: Not support LPSCAN!\n", __func__);
 		ret = -1;
 		goto out;
@@ -1792,7 +1792,7 @@ static ssize_t read_support_feature(struct device *dev,
 	if (ilits->enable_sysinput_enabled)
 		feature |= INPUT_FEATURE_ENABLE_SYSINPUT_ENABLED;
 
-	if(ilits->prox_lp_scan_enabled)
+	if(ilits->prox_lp_scan_mode_enabled)
 		feature |= INPUT_FEATURE_ENABLE_PROX_LP_SCAN_ENABLED;
 
 	input_info(true, ilits->dev, "%s: %d%s%s%s\n",
