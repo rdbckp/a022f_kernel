@@ -89,6 +89,18 @@
 #include <linux/of_gpio.h>
 #endif
 
+
+#ifdef CONFIG_FB
+#include <linux/notifier.h>
+#include <linux/fb.h>
+#else
+#include <linux/earlysuspend.h>
+#endif
+
+#ifdef CONFIG_DRM_MSM
+#include <linux/msm_drm_notify.h>
+#endif
+
 #include "ili9881x_sec_fn.h"
 
 #ifdef CONFIG_MTK_SPI
@@ -413,20 +425,6 @@ enum {
 	LP_FACTORY_STATUS,
 };
 
-enum {
-	SERVICE_SHUTDOWN = -1,
-	LCD_NONE = 0,
-	LCD_OFF,
-	LCD_ON,
-	LCD_DOZE1,
-	LCD_DOZE2
-};
-
-enum {
-	LCD_EARLY_EVENT = 0,
-	LCD_LATE_EVENT
-};
-
 enum MP_INI_PATH {
 	RAWDATANOBK_LCMON_PATH_NUM = 0,
 	DOZERAW_PATH_NUM,
@@ -466,7 +464,7 @@ struct gesture_symbol {
 	u8 alphabet_F                 :1;
 	u8 alphabet_AT                :1;
 	u8 reserve0                   :5;
-} __packed;
+}__packed;
 
 struct report_info_block {
 	u8 nReportByPixel	:1;
@@ -478,7 +476,7 @@ struct report_info_block {
 	u8 nReserved01		:8;
 	u8 nReserved02		:8;
 	u8 nReserved03		:8;
-} __packed;
+}__packed;
 
 #define TDDI_I2C_ADDR				0x41
 #define TDDI_DEV_ID				"ilit_ts"
@@ -910,6 +908,11 @@ struct ilitek_ts_data {
 	struct pinctrl_state *pins_on_state;
 	struct pinctrl_state *pins_off_state;
 
+#ifdef CONFIG_FB
+	struct notifier_block notifier_fb;
+#else
+	struct early_suspend early_suspend;
+#endif
 #if CHARGER_NOTIFIER_CALLBACK
 #if KERNEL_VERSION(4, 1, 0) <= LINUX_VERSION_CODE
 /* add_for_charger_start */
@@ -1115,9 +1118,7 @@ struct ilitek_ts_data {
 	u32 area_edge;
 
 	bool enable_settings_aot;
-	bool enable_sysinput_enabled;
 	bool support_ear_detect;
-	bool prox_lp_scan_enabled;
 	bool support_spay_gesture_mode;
 
 	struct delayed_work work_read_info;
