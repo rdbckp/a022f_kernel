@@ -45,10 +45,6 @@
 #include <linux/input/stui_inf.h>
 #endif
 
-#ifdef CONFIG_BATTERY_SAMSUNG
-extern unsigned int lpcharge;
-#endif
-
 #define NVT_DEBUG 1
 
 //---GPIO number---
@@ -169,8 +165,6 @@ struct nvt_ts_platdata {
 	struct pinctrl *pinctrl;
 	bool support_ear_detect;
 	bool enable_settings_aot;
-	bool enable_sysinput_enabled;
-	bool prox_lp_scan_enabled;
 	bool support_spay;
 	const char *firmware_name;
 	const char *firmware_name_mp;
@@ -246,7 +240,6 @@ struct nvt_ts_data {
 #endif
 	struct sec_cmd_data sec;
 	unsigned int ear_detect_mode;
-	bool ed_reset_flag;
 	long prox_power_off;
 	u8 hover_event;	//virtual_prox
 	bool lcdoff_test;
@@ -305,20 +298,6 @@ enum {
 	POWER_ON_STATUS,
 	LP_MODE_STATUS,
 	LP_MODE_EXIT
-};
-
-enum {
-	SERVICE_SHUTDOWN = -1,
-	LCD_NONE = 0,
-	LCD_OFF,
-	LCD_ON,
-	LCD_DOZE1,
-	LCD_DOZE2
-};
-
-enum {
-	LCD_EARLY_EVENT = 0,
-	LCD_LATE_EVENT
 };
 
 //---SPI READ/WRITE---
@@ -511,8 +490,8 @@ int nvt_ts_fw_update_from_external(struct nvt_ts_data *ts, const char *file_path
 int nvt_get_checksum(struct nvt_ts_data *ts, u8 *csum_result, u8 csum_size);
 int32_t nvt_set_page(uint32_t addr);
 #if PROXIMITY_FUNCTION
-int set_ear_detect(struct nvt_ts_data *ts, int mode);
-int nvt_ts_mode_switch_extened(struct nvt_ts_data *ts, u8 *cmd, u8 len, bool print_log);
+int set_ear_detect(struct nvt_ts_data *ts, int mode, bool stored);
+int nvt_ts_mode_switch_extened(struct nvt_ts_data *ts, u8 *cmd, u8 len, bool stored);
 #endif
 
 #if NVT_TOUCH_ESD_PROTECT
@@ -521,10 +500,5 @@ extern void nvt_esd_check_enable(uint8_t enable);
 
 extern int smcdsd_fb_register_client(struct notifier_block *nb);
 extern int smcdsd_fb_unregister_client(struct notifier_block *nb);
-
-void nvt_ts_early_resume(struct device *dev);
-int32_t nvt_ts_resume(struct device *dev);
-int32_t nvt_ts_suspend(struct device *dev);
-void nvt_ts_shutdown(struct spi_device *client);
 
 #endif /* _LINUX_NVT_TOUCH_H */
