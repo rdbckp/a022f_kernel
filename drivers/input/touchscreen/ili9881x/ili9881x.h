@@ -1088,6 +1088,7 @@ struct ilitek_ts_data {
 	int clear_cover_mode_enabled;
 	int clear_cover_type;
 	bool prox_lp_scan_mode_enabled;
+	bool enable_sysinput_enabled;
 
 	/*sec function*/
 	bool force_update;
