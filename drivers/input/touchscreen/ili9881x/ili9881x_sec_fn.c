@@ -1862,6 +1862,16 @@ static ssize_t protos_event_store(struct device *dev,
 	return count;
 }
 
+static ssize_t scrub_pos_show(struct device *dev,
+		struct device_attribute *attr, char *buf)
+{
+	char buff[256] = { 0 };
+
+	snprintf(buff, sizeof(buff), "%d %d %d", ilits->scrub_id, 0, 0);
+	input_info(true, ilits->dev, "%s: scrub_id: %s\n", __func__, buff);
+
+	return snprintf(buf, PAGE_SIZE, "%s", buff);
+}
 static DEVICE_ATTR(scrub_pos, S_IRUGO, scrub_pos_show, NULL);
 static DEVICE_ATTR(sensitivity_mode, S_IRUGO | S_IWUSR | S_IWGRP, sensitivity_mode_show, sensitivity_mode_store);
 static DEVICE_ATTR(support_feature,  S_IRUGO, read_support_feature, NULL);
