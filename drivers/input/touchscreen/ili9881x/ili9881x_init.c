@@ -858,14 +858,14 @@ static int parse_dt(void)
 	ilits->enable_settings_aot = of_property_read_bool(np, "iliteck,enable_settings_aot");
 	ilits->enable_sysinput_enabled = of_property_read_bool(np, "iliteck,enable_sysinput_enabled");
 	ilits->support_ear_detect = of_property_read_bool(np, "iliteck,support_ear_detect_mode");
-	ilits->prox_lp_scan_enabled = of_property_read_bool(np, "iliteck,prox_lp_scan_enabled");
+	ilits->prox_lp_scan_mode_enabled = of_property_read_bool(np, "iliteck,prox_lp_scan_mode_enabled");
 	ilits->support_spay_gesture_mode = of_property_read_bool(np, "iliteck,support_spay_gesture_mode");
 	input_info(true, ilits->dev, "%s : supprot: %s%s%s%s%s\n",
 				__func__, ilits->enable_settings_aot ? " AOT" : "",
 				ilits->enable_sysinput_enabled ? " SE" : "",
 				ilits->support_ear_detect ? " ED" : "",
 				ilits->support_spay_gesture_mode ? "SPAY" : "",
-				ilits->prox_lp_scan_enabled ? "LPSCAN" : "");
+				ilits->prox_lp_scan_mode_enabled ? "LPSCAN" : "");
 
 	ilits->pinctrl = pinctrl_get_select_default(ilits->dev);
 	if (!IS_ERR(ilits->pinctrl)) {
