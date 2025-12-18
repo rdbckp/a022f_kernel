@@ -13,13 +13,14 @@ jobs:
     - name: Checkout repository
       uses: actions/checkout@v4
 
-    - name: Set Properties
-      id: props
-      run: |
-        echo "date=$(TZ=Asia/Jakarta date +%Y%m%d-%I%M%p)" >> $GITHUB_OUTPUT
-        
     - name: Nyoba
       run: |
         cd ${GITHUB_WORKSPACE}
         git clone https://github.com/manteiga25/rainbow-kernel-samsung-a12 -b main
+        mkdir -p tempe
+        cp -f rainbow-kernel-samsung-a12/drivers/input/touchscreen/ili9881x ${GITHUB_WORKSPACE}/tempe
+        cd tempe
         ls
+        cd drivers/input/touchscreen/ili9881x
+        ls
+        
