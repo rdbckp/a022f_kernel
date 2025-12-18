@@ -18,9 +18,9 @@ jobs:
         cd ${GITHUB_WORKSPACE}
         git clone https://github.com/manteiga25/rainbow-kernel-samsung-a12 -b main
         mkdir -p tempe
-        cp -r ${GITHUB_WORKSPACE}/rainbow-kernel-samsung-a12/drivers/input/touchscreen/ili9881x ${GITHUB_WORKSPACE}/tempe
+        cp -r rainbow-kernel-samsung-a12/drivers/input/touchscreen/ili9881x tempe
         cd tempe
         ls
-        cd drivers/input/touchscreen/ili9881x
+        cd ${GITHUB_WORKSPACE}/tempe/drivers/input/touchscreen/ili9881x
         ls
         
