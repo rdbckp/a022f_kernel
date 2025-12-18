@@ -1,0 +1,25 @@
+name: Tes doang
+
+on:
+  workflow_dispatch:
+
+jobs:
+  making-zip:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+
+    - name: Set Properties
+      id: props
+      run: |
+        echo "date=$(TZ=Asia/Jakarta date +%Y%m%d-%I%M%p)" >> $GITHUB_OUTPUT
+        
+    - name: Nyoba
+      run: |
+        cd ${GITHUB_WORKSPACE}
+        git clone https://github.com/manteiga25/rainbow-kernel-samsung-a12 -b main
+        ls
