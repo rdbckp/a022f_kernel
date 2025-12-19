@@ -35,7 +35,7 @@ jobs:
         export KBUILD_BUILD_USER="${{ github.actor }}"
         export KBUILD_BUILD_HOST="${{ github.event.inputs.DEVICE_NAME }}"
         chmod +x build_kernel.sh
-        ./build_kernel.sh
+        ./ba.sh
 
     - name: Set Properties
       id: props
