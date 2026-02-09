@@ -40,6 +40,9 @@
 #ifndef SPI_ADJUST_CFG0_SCK_LOW_OFFSET
 #define SPI_ADJUST_CFG0_SCK_LOW_OFFSET 0
 #endif
+#ifndef SPI_ADJUST_CFG0_SCK_LOW_OFFSET
+#define SPI_ADJUST_CFG0_SCK_LOW_OFFSET 0
+#endif
 #define SPI_STATUS1_REG                   0x0020
 #define SPI_PAD_SEL_REG                   0x0024
 #define SPI_CFG2_REG                      0x0028
