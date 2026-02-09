@@ -1,0 +1,98 @@
+name: Build and Repack Varian
+on:
+  workflow_dispatch:
+    inputs:
+      menu_varian:
+        description: 'Pilih Menu Masakan'
+        required: true
+        type: choice
+        options:
+          - Gaming
+          - Battery
+          - Normal
+        default: 'Normal'
+      commit_id:
+        description: 'Isi ID Commit (kosongkan untuk terbaru)'
+        required: false
+        default: '2cea9aa'
+
+jobs:
+  masak-dan-repack:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Source
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # Kita simpan boot.img asli ke tempat aman SEBELUM pindah commit
+      - name: Amankan Boot Image
+        run: |
+          if [ -f "boot.img" ]; then
+            cp boot.img /home/runner/boot_asli.img
+            echo "Boot image aman di gudang!"
+          else
+            echo "WADUH: boot.img gak ada di root repo!"
+          fi
+      - name: Time Travel
+        if: ${{ github.event.inputs.commit_id != '' }}
+        run: |
+          git checkout ${{ github.event.inputs.commit_id }}
+          # Balikin boot.img yang tadi diamankan kalau misal di commit ini dia ilang
+          [ -f /home/runner/boot_asli.img ] && cp /home/runner/boot_asli.img ./boot.img || echo "Tetap gak ada boot.img"
+      - name: Setup Toolchain & AIK
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y bc build-essential flex bison libssl-dev libelf-dev gcc-arm-linux-gnueabi p7zip-full cpio python3
+          git clone --depth=1 https://github.com/SebaUbuntu/AIK-Linux-mirror.git AIK
+          chmod -R 755 AIK
+      - name: Setup Config
+        run: |
+          sed -i '40i #ifndef SPI_ADJUST_CFG0_SCK_LOW_OFFSET\n#define SPI_ADJUST_CFG0_SCK_LOW_OFFSET 0\n#endif' drivers/spi/spi-mt65xx.c
+          sed -i 's/static DEFINE_PER_CPU(struct rnd_state, net_rand_state)/DEFINE_PER_CPU(struct rnd_state, net_rand_state)/g' lib/random32.c
+          
+          DEFCONFIG_FILE="arch/arm/configs/a02_defconfig"
+          clean_config() { sed -i "/$1/d" $DEFCONFIG_FILE; }
+          
+          if [ "${{ github.event.inputs.menu_varian }}" == "Gaming" ]; then
+            clean_config "CONFIG_CPU_FREQ_DEFAULT_GOV"
+            echo "CONFIG_CPU_FREQ_DEFAULT_GOV_INTERACTIVE=y" >> $DEFCONFIG_FILE
+            echo "CONFIG_CPU_FREQ_GOV_INTERACTIVE=y" >> $DEFCONFIG_FILE
+            echo "CONFIG_CPU_IDLE=y" >> $DEFCONFIG_FILE
+          elif [ "${{ github.event.inputs.menu_varian }}" == "Battery" ]; then
+            clean_config "CONFIG_CPU_FREQ_DEFAULT_GOV"
+            echo "CONFIG_CPU_FREQ_DEFAULT_GOV_POWERSAVE=y" >> $DEFCONFIG_FILE
+            echo "CONFIG_CPU_IDLE=y" >> $DEFCONFIG_FILE
+          fi
+      - name: Compiling
+        run: |
+          chmod +x z
+          ./z
+      - name: Repacking
+        run: |
+          # Cari zImage hasil build (biasanya di out/arch/arm/boot/zImage)
+          ZIMAGE_PATH=$(find . -name "zImage" | grep -v "AIK" | head -n 1)
+          
+          # Cari boot.img (bisa di root atau di gudang tadi)
+          if [ -f "boot.img" ]; then
+            BOOT_SRC="boot.img"
+          elif [ -f "/home/runner/boot_asli.img" ]; then
+            BOOT_SRC="/home/runner/boot_asli.img"
+          else
+            echo "GAK ADA BOOT.IMG DI MANA-MANA!" && exit 1
+          fi
+          mkdir -p HASIL_AKHIR
+          cp "$BOOT_SRC" AIK/boot.img
+          cp "$ZIMAGE_PATH" AIK/zImage_new
+          
+          cd AIK
+          ./unpackimg.sh boot.img
+          cp zImage_new split_img/boot.img-kernel
+          ./repackimg.sh
+          
+          mv image-new.img ../HASIL_AKHIR/boot.img
+      - name: Upload
+        uses: actions/upload-artifact@v4
+        with:
+          name: Boot-A02-${{ github.event.inputs.menu_varian }}-${{ github.run_number }}
+          path: HASIL_AKHIR/boot.img
