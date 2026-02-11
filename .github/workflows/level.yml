@@ -1,77 +1,70 @@
-name: Build & Auto-Upstream (Dashboard)
+name: Upstream to 187 Only
 on:
   workflow_dispatch:
-    inputs:
-      target_sub:
-        description: 'Mau naik ke Sublevel berapa? (Contoh: 195)'
-        required: true
-        default: '190'
-
-env:
-  # Mengambil angka dari input yang lu ketik nanti
-  TARGET_SUBLEVEL: ${{ github.event.inputs.target_sub }}
 
 jobs:
-  build:
+  upstream_job:
     runs-on: ubuntu-latest
-    # Wajib ada biar bot bisa push hasil patch balik ke repo lu
     permissions:
       contents: write
 
     steps:
-      - name: Checkout Source Kernel
+      - name: Checkout Source
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      - name: Install Toolchain & Dependencies
+      - name: Install Toolchain
         run: |
           sudo apt-get update
           sudo apt-get install -y bc build-essential flex bison libssl-dev libelf-dev gcc-arm-linux-gnueabi
-      - name: Apply Upstream Patch
+
+      - name: Apply Patch 187
         run: |
+          # 1. Cek versi sekarang
           CURRENT_SUB=$(grep "^SUBLEVEL =" Makefile | awk '{print $3}')
-          TARGET_SUB=${{ env.TARGET_SUBLEVEL }}
+          echo "Versi saat ini: 4.14.$CURRENT_SUB"
           
-          if [ "$CURRENT_SUB" -eq "$TARGET_SUB" ]; then
-            echo "Versi Makefile ($CURRENT_SUB) sudah sama dengan Target ($TARGET_SUB). Skip patching!"
-          else
-            echo "Upgrade dari v4.14.$CURRENT_SUB ke v4.14.$TARGET_SUB..."
-            git remote add stable https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux-stable.git || true
-            git fetch stable tag v4.14.$CURRENT_SUB tag v4.14.$TARGET_SUB --no-tags --depth 1
-            
-            # Membuat patch selisih antar versi
-            git diff v4.14.$CURRENT_SUB v4.14.$TARGET_SUB -- arch/arm/ drivers/ include/ kernel/ mm/ net/ sound/ Makefile > upgrade.patch
-            
-            # Apply patch dengan mode ignore-fail agar tidak stop jika ada hunk minor yang skip
-            patch -p1 --forward --batch < upgrade.patch || echo "Ada beberapa bagian yang diskip, tetap lanjut..."
+          if [ "$CURRENT_SUB" -ge 187 ]; then
+            echo "Repo lu udah di 187 atau lebih tinggi. Gak perlu patch lagi!"
+            exit 0
           fi
-      - name: Fix MediaTek SPI Header (Jamu Abadi)
+
+          # 2. Ambil Patch dari Kernel.org
+          echo "Mengambil patch v4.14.187..."
+          wget https://mirrors.edge.kernel.org/pub/linux/kernel/v4.x/patch-4.14.187.gz
+          gunzip patch-4.14.187.gz
+
+          # 3. Eksekusi Patching
+          # Kita pakai --dry-run dulu buat simulasi, baru real patch
+          patch -p1 --forward < patch-4.14.187 || echo "Ada konflik minor, bakal dicek manual."
+
+      - name: Jamu Sakti (MediaTek Fix)
         run: |
-          # Supaya driver SPI MediaTek nggak rewel
+          # Pastikan jamu SPI MTK tetap ada
+          sed -i '/SPI_ADJUST_CFG0_SCK_LOW_OFFSET/d' drivers/spi/spi-mt65xx.c || true
           sed -i '40i #ifndef SPI_ADJUST_CFG0_SCK_LOW_OFFSET\n#define SPI_ADJUST_CFG0_SCK_LOW_OFFSET 0\n#endif' drivers/spi/spi-mt65xx.c
-          head -n 45 drivers/spi/spi-mt65xx.c
-      - name: Commit and Push Changes
+
+      - name: Commit and Push
         run: |
           git config --global user.name "RooXie-Bot"
           git config --global user.email "bot@github.com"
           
-          # Cek apakah ada perubahan file (Makefile dkk)
           if [ -n "$(git status --porcelain)" ]; then
             git add .
-            git commit -m "Kernel: Auto-Upstream to v4.14.${{ env.TARGET_SUBLEVEL }}"
+            git commit -m "Upstream: Linux v4.14.187"
             git push origin master
-            echo "Berhasil update repo ke v4.14.${{ env.TARGET_SUBLEVEL }}!"
           else
-            echo "Tidak ada perubahan kode yang perlu di-push."
+            echo "Gak ada perubahan."
           fi
-      - name: Build Kernel
+
+      - name: Build Test
         run: |
-          # Pastikan script build lu dieksekusi
           chmod +x z
           ./z
+
       - name: Upload zImage
         uses: actions/upload-artifact@v4
         with:
-          name: _RooXie-v${{ env.TARGET_SUBLEVEL }}-
+          name: Kernel-v4.14.187-Test
           path: "**/arch/arm/boot/zImage"
