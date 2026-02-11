@@ -37,9 +37,9 @@
 #define SPI_RX_DATA_REG                   0x0014
 #define SPI_CMD_REG                       0x0018
 #define SPI_STATUS0_REG                   0x001c
-#ifndef SPI_ADJUST_CFG0_SCK_LOW_OFFSET
-#define SPI_ADJUST_CFG0_SCK_LOW_OFFSET 0
-#endif
+#define SPI_STATUS1_REG                   0x0020
+#define SPI_PAD_SEL_REG                   0x0024
+#define SPI_CFG2_REG                      0x0028
 #define SPI_TX_SRC_REG_64                 0x002c
 #define SPI_RX_DST_REG_64                 0x0030
 
@@ -47,6 +47,9 @@
 #define SPI_CFG0_SCK_LOW_OFFSET           8
 #define SPI_CFG0_CS_HOLD_OFFSET           16
 #define SPI_CFG0_CS_SETUP_OFFSET          24
+#define SPI_ADJUST_CFG0_SCK_LOW_OFFSET    16
+#define SPI_ADJUST_CFG0_CS_HOLD_OFFSET    0
+#define SPI_ADJUST_CFG0_CS_SETUP_OFFSET   16
 
 #define SPI_CFG1_CS_IDLE_OFFSET           0
 #define SPI_CFG1_PACKET_LOOP_OFFSET       8
@@ -432,6 +435,7 @@ static void mtk_spi_prepare_transfer(struct spi_master *master,
 		reg_val |= (((sck_time - 1) & 0xffff)
 			   << SPI_CFG0_SCK_HIGH_OFFSET);
 		reg_val |= (((sck_time - 1) & 0xffff)
+			   << SPI_ADJUST_CFG0_SCK_LOW_OFFSET);
 		writel(reg_val, mdata->base + SPI_CFG2_REG);
 
 		reg_val = 0;
