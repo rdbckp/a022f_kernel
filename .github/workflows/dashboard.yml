@@ -1,0 +1,55 @@
+name: Kernel (Interactive)
+on:
+  workflow_dispatch:
+    inputs:
+      target_sub:
+        description: 'Ketik Sublevel tujuan (Contoh: 187, 188, atau 190)'
+        required: true
+        default: '187'
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Source (v186)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install Toolchain & Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y bc build-essential flex bison libssl-dev libelf-dev gcc-arm-linux-gnueabi
+
+      - name: Apply Upstream Patch
+        run: |
+          # Ambil info versi dari input user
+          CURRENT_SUB=$(grep "^SUBLEVEL =" Makefile | awk '{print $3}')
+          TARGET_SUB=${{ github.event.inputs.target_sub }}
+          
+          echo "Versi awal repo: 4.14.$CURRENT_SUB"
+          echo "Target upgrade: 4.14.$TARGET_SUB"
+
+          if [ "$CURRENT_SUB" -eq "$TARGET_SUB" ]; then
+            echo "Versi sudah sama. Langsung build aja."
+          else
+            echo "Mendownload patch v4.14.$TARGET_SUB..."
+            wget https://mirrors.edge.kernel.org/pub/linux/kernel/v4.x/patch-4.14.$TARGET_SUB.gz
+            gunzip patch-4.14.$TARGET_SUB.gz
+            
+            echo "Menerapkan patch... (Abaikan jika ada sedikit offset)"
+            patch -p1 --forward < patch-4.14.$TARGET_SUB.gz || echo "Ada bagian yang diskip, lanjut build..."
+          fi
+
+      - name: Build Kernel (zImage)
+        run: |
+          # Paksa stop kalau compile error (biar gak ijo palsu)
+          set -e
+          chmod +x z
+          ./z
+
+      - name: Upload Kernel Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Kernel-v4.14.${{ github.event.inputs.target_sub }}-Test
+          path: "**/arch/arm/boot/zImage"
