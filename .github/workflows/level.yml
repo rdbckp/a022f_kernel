@@ -41,9 +41,25 @@ jobs:
 
       - name: Jamu Sakti (MediaTek Fix)
         run: |
-          # Pastikan jamu SPI MTK tetap ada
-          sed -i '/SPI_ADJUST_CFG0_SCK_LOW_OFFSET/d' drivers/spi/spi-mt65xx.c || true
-          sed -i '40i #ifndef SPI_ADJUST_CFG0_SCK_LOW_OFFSET\n#define SPI_ADJUST_CFG0_SCK_LOW_OFFSET 0\n#endif' drivers/spi/spi-mt65xx.c
+          # 1. Masuk ke folder driver
+          FILE="drivers/spi/spi-mt65xx.c"
+          
+          # 2. Hapus semua baris jamu lama (baris 35 sampai 50 kita bersihin biar gak tumpang tindih)
+          # Kita hapus baris yang mengandung keyword spesifik jamu kita
+          sed -i '/SPI_ADJUST_CFG0_SCK_LOW_OFFSET/d' $FILE
+          sed -i '/#ifndef SPI_ADJUST/d' $FILE
+          sed -i '/#define SPI_ADJUST/d' $FILE
+          
+          # 3. Hapus #endif liar yang mungkin nyisa (ini biang kerok error lu)
+          # Kita pake trik: hapus baris kosong atau baris #endif yang gak jelas di area atas
+          sed -i '40,45d' $FILE
+          
+          # 4. Pasang Jamu yang Rapi & Presisi di baris 40
+          # Kita pake blok kode yang lengkap biar aman
+          sed -i '40i #ifndef SPI_ADJUST_CFG0_SCK_LOW_OFFSET\n#define SPI_ADJUST_CFG0_SCK_LOW_OFFSET 0\n#endif' $FILE
+          
+          echo "Isi file setelah diobati:"
+          sed -n '35,50p' $FILE
 
       - name: Commit and Push
         run: |
