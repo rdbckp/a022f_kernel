@@ -76,6 +76,7 @@ jobs:
 
       - name: Build Test
         run: |
+          set -e
           chmod +x z
           ./z
 
