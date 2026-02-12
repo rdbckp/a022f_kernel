@@ -1089,7 +1089,7 @@ struct ilitek_ts_data {
 	bool started_prox_intensity;
 	bool incell_power_state;
 	bool signing;
-	char mp_ini_path[5][128];
+	char mp_ini_path[MP_INI_PATH_MAX][INI_PATH_SIZE];
 
 	unsigned int scrub_id;
 
