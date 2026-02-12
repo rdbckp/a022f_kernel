@@ -1,5 +1,5 @@
 /*
- * ILITEK Touch IC driver_fix
+ * ILITEK Touch IC driver
  *
  * Copyright (C) 2011 ILI Technology Corporation.
  *
@@ -627,7 +627,6 @@ static int ilitek_spi_probe(struct spi_device *spi)
 	ilits->game_mode_enabled = false;
 	ilits->clear_cover_mode_enabled = false;
 	ilits->prox_lp_scan_mode_enabled = false;
-	ilits->sleep_handler_mode = TP_RESUME;
 
 #if ENABLE_GESTURE
 	ilits->gesture = DISABLE;
