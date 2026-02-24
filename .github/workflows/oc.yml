@@ -8,11 +8,13 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout repo
+      - name: Checkout repo (branch 186)
         uses: actions/checkout@v4
+        with:
+          ref: 186
 
       # ======================================
-      # SAFE OC PATCH (1550 MHz) - IDIOT PROOF
+      # SAFE OC PATCH (1550 MHz)
       # ======================================
       - name: Apply OC patch (1550 MHz clamp)
         run: python3 -c "from pathlib import Path; f=Path('drivers/cpufreq/cpufreq.c'); d=f.read_text(); n='int cpufreq_generic_init(struct cpufreq_policy *policy,'; i='    /* OC CLAMP SYSTEM - SAFE DAILY OC */\\n    if (policy->max > 1550000)\\n        policy->max = 1550000;\\n\\n'; p=d.find(n); b=d.find('{',p); f.write_text(d[:b+1]+'\\n'+i+d[b+1:]); print('[+] OC patch injected')"
@@ -44,5 +46,5 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: a02-oc-1550mhz-${{ github.run_number }}
-          name: "A02 OC Kernel 1550MHz"
+          name: "A02 OC Kernel 1550MHz (branch 186)"
           files: out/zImage
