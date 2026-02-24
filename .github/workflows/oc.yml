@@ -31,16 +31,25 @@ jobs:
         echo "[+] Patching $FILE"
 
         cp $FILE ${FILE}.bak
-
+ 
+ 
         # Insert AFTER opening brace of cpufreq_generic_init()
+        # Insert AFTER the opening brace of cpufreq_generic_init()
         sed -i '/int cpufreq_generic_init(struct cpufreq_policy \*policy,/{ 
+        sed -i '/cpufreq_generic_init(struct cpufreq_policy \*policy/,/^{/{
           n
+        /{/a\
           a\
+        if (policy->max > 1550000)\
         \ \ \ \ if (policy->max > 1550000)\
+            policy->max = 1550000;
         \ \ \ \ \ \ \ \ policy->max = 1550000;\
-        }' $FILE
-
-        echo "[+] Patch applied successfully"
+         }' $FILE
+         }' $FILE
+ 
+ 
+         echo "[+] Patch applied successfully"
+         echo "[+] Patch applied successfully"
 
     # ======================================
     # PERMISSION
