@@ -1,4 +1,4 @@
-name: A02 Kernel OC 1550MHz - zImage Release
+name: A02 Kernel OC 1550MHz
 
 on:
   workflow_dispatch:
@@ -8,95 +8,41 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-    - name: Checkout repo
-      uses: actions/checkout@v4
-      with:
-        ref: 186
+      - name: Checkout repo
+        uses: actions/checkout@v4
 
-    - name: Install dependencies
-      run: |
-        sudo apt update
-        sudo apt install -y \
-          bc bison build-essential ccache curl flex g++-multilib gcc-multilib \
-          git gnupg gperf libncurses5-dev libssl-dev \
-          libxml2-utils lzop unzip zip zlib1g-dev \
-          python3 python3-pip
+      # ======================================
+      # SAFE OC PATCH (1550 MHz) - IDIOT PROOF
+      # ======================================
+      - name: Apply OC patch (1550 MHz clamp)
+        run: python3 -c "from pathlib import Path; f=Path('drivers/cpufreq/cpufreq.c'); d=f.read_text(); n='int cpufreq_generic_init(struct cpufreq_policy *policy,'; i='    /* OC CLAMP SYSTEM - SAFE DAILY OC */\\n    if (policy->max > 1550000)\\n        policy->max = 1550000;\\n\\n'; p=d.find(n); b=d.find('{',p); f.write_text(d[:b+1]+'\\n'+i+d[b+1:]); print('[+] OC patch injected')"
 
-    # ======================================
-    # SAFE KERNEL PATCH (1550 MHz CLAMP)
-    # ======================================
-    - name: Patch CPU max freq clamp (1550 MHz)
-      run: |
-        FILE="drivers/cpufreq/cpufreq.c"
-        echo "[+] Patching $FILE"
+      # ======================================
+      # PERMISSION
+      # ======================================
+      - name: Fix build script permission
+        run: chmod +x z
 
-        cp $FILE ${FILE}.bak
- 
- 
-        # Insert AFTER opening brace of cpufreq_generic_init()
-        # Insert AFTER the opening brace of cpufreq_generic_init()
-        sed -i '/int cpufreq_generic_init(struct cpufreq_policy \*policy,/{ 
-        sed -i '/cpufreq_generic_init(struct cpufreq_policy \*policy/,/^{/{
-          n
-        /{/a\
-          a\
-        if (policy->max > 1550000)\
-        \ \ \ \ if (policy->max > 1550000)\
-            policy->max = 1550000;
-        \ \ \ \ \ \ \ \ policy->max = 1550000;\
-         }' $FILE
-         }' $FILE
- 
- 
-         echo "[+] Patch applied successfully"
-         echo "[+] Patch applied successfully"
+      # ======================================
+      # BUILD
+      # ======================================
+      - name: Build kernel (script z)
+        run: ./z
 
-    # ======================================
-    # PERMISSION
-    # ======================================
-    - name: Fix build script permission
-      run: chmod +x z
+      # ======================================
+      # COLLECT zImage ONLY
+      # ======================================
+      - name: Collect zImage
+        run: |
+          mkdir -p out
+          find . -name "zImage" -exec cp {} out/zImage \;
 
-    # ======================================
-    # BUILD
-    # ======================================
-    - name: Build kernel (script z)
-      run: ./z
-
-    # ======================================
-    # COLLECT zImage ONLY
-    # ======================================
-    - name: Collect zImage
-      run: |
-        mkdir -p out
-        find . -name "zImage" -exec cp {} out/zImage \;
-
-        echo "==== zImage ===="
-        ls -lah out/zImage
-
-    # ======================================
-    # RELEASE (zImage only)
-    # ======================================
-    - name: Create GitHub Release
-      uses: softprops/action-gh-release@v2
-      with:
-        tag_name: a02-oc-1550mhz
-        name: "Samsung A02 Kernel OC 1550MHz"
-        body: |
-          Device : Samsung Galaxy A02 (SM-A022F)
-          Kernel : Linux 4.14.186
-          Android: 11
-          Arch   : ARM32
-          CPU OC : 1550 MHz (SAFE DAILY)
-          
-          Build system : GitHub Actions
-          Build script : z
-          Output       : zImage only
-          
-          Kernel-level CPU freq clamp
-          Governor default : schedutil
-          Mode            : balanced
-          
-          Stable daily OC build.
-        files: |
-          out/zImage
+      # ======================================
+      # RELEASE (zImage ONLY)
+      # ======================================
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: a02-oc-1550mhz-${{ github.run_number }}
+          name: "A02 OC Kernel 1550MHz"
+          files: out/zImage
