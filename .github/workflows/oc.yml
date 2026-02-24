@@ -15,7 +15,10 @@ jobs:
 
       - name: Apply Patch
         run: |
-          python3 -c "exec(\"from pathlib import Path\nimport glob\nfiles=glob.glob('arch/arm/boot/dts/**/*.dts',recursive=True)\ninjected=False\nfor f in files:\n p=Path(f)\n try:\n  d=p.read_text(errors='ignore')\n except:\n  continue\n if 'opp-1495000' in d:\n  i='\\n\\topp-1550000 {\\n\\t\\topp-hz = /bits/ 64 <1550000000>;\\n\\t\\topp-microvolt = <925000>;\\n\\t};\\n\\n\\topp-1600000 {\\n\\t\\topp-hz = /bits/ 64 <1600000000>;\\n\\t\\topp-microvolt = <950000>;\\n\\t};\\n'\n  d=d.replace('opp-1495000 {','opp-1495000 {'+i,1)\n  p.write_text(d)\n  print('[+] Injected REAL OC OPP into',f)\n  injected=True\n  break\nprint('[+] REAL OC DTS patch done' if injected else '[-] OPP table not found - patch failed')\")"
+          python3 -c "from pathlib import Path; import glob; files=glob.glob('arch/arm/boot/dts/**/*.dts', recursive=True); injected=False; \
+          i='\\n\\topp-1550000 {\\n\\t\\topp-hz = /bits/ 64 <1550000000>;\\n\\t\\topp-microvolt = <925000>;\\n\\t};\\n\\n\\topp-1600000 {\\n\\t\\topp-hz = /bits/ 64 <1600000000>;\\n\\t\\topp-microvolt = <950000>;\\n\\t};\\n'; \
+          [ (lambda p: (p.write_text(p.read_text(errors='ignore').replace('opp-1495000 {','opp-1495000 {'+i,1)), print('[+] Injected REAL OC OPP into', p), True)[2] if 'opp-1495000' in p.read_text(errors='ignore') and not injected else False)(Path(f)) or (injected:=True) for f in files if not injected ]; \
+          print('[+] REAL OC DTS patch done' if injected else '[-] OPP table not found - patch failed')"
 
       # ======================================
       # BUILD
