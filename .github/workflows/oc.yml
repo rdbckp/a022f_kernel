@@ -55,11 +55,11 @@ jobs:
     # =========================
     - name: Collect output
       run: |
-        mkdir -p out
-        find . -name "zImage" -exec cp {} out/ \; || true
+        mkdir -p output
+        find . -name "zImage" -exec cp {} output/ \; || true
 
     - name: Upload artifact
       uses: actions/upload-artifact@v4
       with:
         name: a02-kernel-1550mhz-gov-integrated
-        path: out/
+        path: output/
