@@ -17,27 +17,18 @@ jobs:
       # REAL OC PATCH (DTS / OPP TABLE)
       # ======================================
       - name: Apply REAL OC patch (DTS OPP 1550/1600)
-        run: python3 -c "from pathlib import Path; import glob; files=glob.glob('arch/arm/boot/dts/**/*.dts', recursive=True); injected=False; for f in files: p=Path(f); d=p.read_text(errors='ignore'); if 'opp-1495000' in d: i='\\n\\topp-1550000 {\\n\\t\\topp-hz = /bits/ 64 <1550000000>;\\n\\t\\topp-microvolt = <925000>;\\n\\t};\\n\\n\\topp-1600000 {\\n\\t\\topp-hz = /bits/ 64 <1600000000>;\\n\\t\\topp-microvolt = <950000>;\\n\\t};\\n'; d=d.replace('opp-1495000 {', 'opp-1495000 {'+i, 1); p.write_text(d); print('[+] Injected REAL OC OPP into', f); injected=True; break; print('[+] REAL OC DTS patch done' if injected else '[-] OPP table not found - patch failed')"
-
-      # ======================================
-      # PERMISSION
-      # ======================================
-      - name: Fix build script permission
-        run: chmod +x z
+        run: |
+          "from pathlib import Path; import glob; files=glob.glob('arch/arm/boot/dts/**/*.dts', recursive=True); injected=False; for f in files: p=Path(f); d=p.read_text(errors='ignore'); if 'opp-1495000' in d: i='\\n\\topp-1550000 {\\n\\t\\topp-hz = /bits/ 64 <1550000000>;\\n\\t\\topp-microvolt = <925000>;\\n\\t};\\n\\n\\topp-1600000 {\\n\\t\\topp-hz = /bits/ 64 <1600000000>;\\n\\t\\topp-microvolt = <950000>;\\n\\t};\\n'; d=d.replace('opp-1495000 {', 'opp-1495000 {'+i, 1); p.write_text(d); print('[+] Injected REAL OC OPP into', f); injected=True; break; print('[+] REAL OC DTS patch done' if injected else '[-] OPP table not found - patch failed')"
 
       # ======================================
       # BUILD
       # ======================================
-      - name: Build kernel (script z)
-        run: ./z
-
-      # ======================================
-      # COLLECT zImage ONLY
-      # ======================================
       - name: Collect zImage
         run: |
-          mkdir -p out
-          find . -name "zImage" -exec cp {} out/zImage \;
+          chmod +x z
+          ./z
+          mkdir -p outz
+          find . -name "zImage" -exec cp {} outz/zImage \;
 
       # ======================================
       # RELEASE (zImage ONLY)
@@ -47,4 +38,4 @@ jobs:
         with:
           tag_name: a02-real-oc-1550-1600mhz-${{ github.run_number }}
           name: "Samsung A02 REAL OC Kernel 1550/1600MHz (branch 186)"
-          files: out/zImage
+          files: outz/zImage
