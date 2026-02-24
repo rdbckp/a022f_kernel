@@ -1,0 +1,77 @@
+name: Manual OC Kernel Build - A02 1600MHz
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout repo
+      uses: actions/checkout@v4
+      with:
+        ref: 186
+
+    - name: Install dependencies
+      run: |
+        sudo apt update
+        sudo apt install -y \
+          bc bison build-essential ccache curl flex g++-multilib gcc-multilib \
+          git gnupg gperf libncurses5-dev libssl-dev \
+          libxml2-utils lzop unzip zip zlib1g-dev \
+          python3 python3-pip
+
+    # =========================
+    # AUTO PATCH OVERCLOCK
+    # =========================
+    - name: Apply CPU Overclock Patch (1495 -> 1600 MHz)
+      run: |
+        echo "=== Searching 1495 MHz freq entries ==="
+        grep -R "1495000" -n drivers arch || true
+        grep -R "1495000000" -n arch || true
+
+        echo "=== Applying patch ==="
+        grep -rl "1495000" drivers arch | xargs sed -i 's/1495000/1600000/g' || true
+        grep -rl "1495000000" arch | xargs sed -i 's/1495000000/1600000000/g' || true
+
+        echo "=== Verify OC patch ==="
+        grep -R "1600000" -n drivers arch || true
+        grep -R "1600000000" -n arch || true
+
+    # =========================
+    # PERMISSION
+    # =========================
+    - name: Fix script permission
+      run: |
+        chmod +x z
+
+    # =========================
+    # BUILD KERNEL VIA SCRIPT z
+    # =========================
+    - name: Build kernel (script z)
+      run: |
+        ./z
+
+    # =========================
+    # COLLECT OUTPUT
+    # =========================
+    - name: Collect build output
+      run: |
+        mkdir -p out
+        find . -name "zImage" -exec cp {} out/ \; || true
+        find . -name "Image" -exec cp {} out/ \; || true
+        find . -name "*.dtb" -exec cp {} out/ \; || true
+        find . -name "*.dtbo" -exec cp {} out/ \; || true
+
+        echo "=== Output files ==="
+        ls -lah out || true
+
+    # =========================
+    # UPLOAD ARTIFACT
+    # =========================
+    - name: Upload artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: a02-oc-kernel-1600mhz
+        path: out/
