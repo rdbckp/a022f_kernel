@@ -141,7 +141,7 @@
 #define RESUME_BY_DDI			DISABLE
 #define BOOT_FW_UPDATE			ENABLE
 #define MP_INT_LEVEL			DISABLE
-#define PLL_CLK_WAKEUP_TP_RESUME	DISABLE
+#define PLL_CLK_WAKEUP_TP_RESUME	ENABLE   /* [FIX] resume-latency: enable pll wakeup on every TP resume to prevent 5-7s touch delay after screen-off */
 #define CHARGER_NOTIFIER_CALLBACK	DISABLE
 #define PROXIMITY_BY_FW			ENABLE
 #define AXIS_PACKET			ENABLE
@@ -424,6 +424,38 @@ enum {
 	LP_FACTORY_STATUS,
 };
 
+enum {
+	SERVICE_SHUTDOWN = -1,
+	LCD_NONE = 0,
+	LCD_OFF,
+	LCD_ON,
+	LCD_DOZE1,
+	LCD_DOZE2
+};
+
+enum {
+	LCD_EARLY_EVENT = 0,
+	LCD_LATE_EVENT
+};
+
+enum MP_INI_PATH {
+	RAWDATANOBK_LCMON_PATH_NUM = 0,
+	DOZERAW_PATH_NUM,
+	DAC_PATH_NUM,
+	OPENTESTC_PATH_NUM,
+	SHORTTEST_PATH_NUM,
+	NOISEPP_LCMON_PATH_NUM,
+	DOZEPP_PATH_NUM,
+	NOISEPP_LCMOFF_PATH_NUM,
+	P2P_TD_PATH_NUM,
+	RAWDATATD_PATH_NUM,
+	RAWDATANOBK_LCMOFF_PATH_NUM,
+	/* only for 9882q */
+	RAWDATAHAVEBK_LCMON_PATH_NUM,
+	RAWDATAHAVEBK_LCMOFF_PATH_NUM,
+	MP_INI_PATH_MAX
+};
+
 struct gesture_symbol {
 	u8 double_tap                 :1;
 	u8 alphabet_line_2_top        :1;
@@ -445,7 +477,7 @@ struct gesture_symbol {
 	u8 alphabet_F                 :1;
 	u8 alphabet_AT                :1;
 	u8 reserve0                   :5;
-}__packed;
+} __packed;
 
 struct report_info_block {
 	u8 nReportByPixel	:1;
@@ -457,7 +489,7 @@ struct report_info_block {
 	u8 nReserved01		:8;
 	u8 nReserved02		:8;
 	u8 nReserved03		:8;
-}__packed;
+} __packed;
 
 #define TDDI_I2C_ADDR				0x41
 #define TDDI_DEV_ID				"ilit_ts"
@@ -894,6 +926,7 @@ struct ilitek_ts_data {
 #else
 	struct early_suspend early_suspend;
 #endif
+
 #if CHARGER_NOTIFIER_CALLBACK
 #if KERNEL_VERSION(4, 1, 0) <= LINUX_VERSION_CODE
 /* add_for_charger_start */
@@ -1099,7 +1132,9 @@ struct ilitek_ts_data {
 	u32 area_edge;
 
 	bool enable_settings_aot;
+	bool enable_sysinput_enabled;
 	bool support_ear_detect;
+	bool prox_lp_scan_enabled;
 	bool support_spay_gesture_mode;
 
 	struct delayed_work work_read_info;
