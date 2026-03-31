@@ -1132,9 +1132,7 @@ struct ilitek_ts_data {
 	u32 area_edge;
 
 	bool enable_settings_aot;
-	bool enable_sysinput_enabled;
 	bool support_ear_detect;
-	bool prox_lp_scan_enabled;
 	bool support_spay_gesture_mode;
 
 	struct delayed_work work_read_info;
