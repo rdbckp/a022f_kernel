@@ -1,0 +1,81 @@
+name: OC Patch + Build Kernel (No Repo Changes)
+
+on:
+  workflow_dispatch:
+    inputs:
+      branch:
+        description: 'Branch to checkout'
+        required: true
+        default: '186-master'
+      new_max_freq_khz:
+        description: 'New max freq for SB table (KHz) - step 1 test value'
+        required: true
+        default: '1530000'
+      new_max_volt_10uv:
+        description: 'New max voltage for SB table (10uV units) - step 1 test value = 1.325V'
+        required: true
+        default: '132500'
+
+jobs:
+  patch-and-build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout kernel repo (fresh clone, nothing ever pushed back)
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.branch }}
+          fetch-depth: 1
+
+      - name: Patch OPP table in-place on runner only
+        run: |
+          F=drivers/misc/mediatek/base/power/cpufreq_v2/src/mach/mt6739/mtk_cpufreq_opp_table.h
+
+          echo "=== BEFORE ==="
+          grep -E "CPU_DVFS_FREQ0_LL_SB|CPU_DVFS_VOLT0_VPROC1_SB|CPU_DVFS_FREQ0_LL_FY[^2]|CPU_DVFS_VOLT0_VPROC1_FY[^2]" "$F"
+
+          NEW_FREQ="${{ github.event.inputs.new_max_freq_khz }}"
+          NEW_VOLT="${{ github.event.inputs.new_max_volt_10uv }}"
+
+          # bump top of SB table (CPU_LEVEL_1 path)
+          sed -i "s/#define CPU_DVFS_FREQ0_LL_SB\s*1495000/#define CPU_DVFS_FREQ0_LL_SB\t\t${NEW_FREQ}/" "$F"
+          sed -i "s/#define CPU_DVFS_VOLT0_VPROC1_SB\s*130625/#define CPU_DVFS_VOLT0_VPROC1_SB\t 135000/" "$F"
+
+          # bump top of FY table (CPU_LEVEL_0 fallback path) proportionally, smaller bump for safety
+          sed -i "s/#define CPU_DVFS_FREQ0_LL_FY\s*1274000/#define CPU_DVFS_FREQ0_LL_FY\t\t1400000/" "$F"
+          sed -i "s/#define CPU_DVFS_VOLT0_VPROC1_FY\s*130625/#define CPU_DVFS_VOLT0_VPROC1_FY\t 135000/" "$F"
+
+          echo "=== AFTER ==="
+          grep -E "CPU_DVFS_FREQ0_LL_SB|CPU_DVFS_VOLT0_VPROC1_SB|CPU_DVFS_FREQ0_LL_FY[^2]|CPU_DVFS_VOLT0_VPROC1_FY[^2]" "$F"
+
+          mkdir -p /tmp/patched-ref
+          cp "$F" /tmp/patched-ref/
+
+      - name: Run build script
+        run: |
+          chmod +x ./z
+          ./z
+
+      - name: Locate build output
+        run: |
+          mkdir -p /tmp/out
+          find . -iname "zImage-dtb" -o -iname "zImage" 2>/dev/null | tee /tmp/found-outputs.txt
+          while IFS= read -r f; do
+            cp "$f" /tmp/out/ 2>/dev/null
+          done < /tmp/found-outputs.txt
+          cp /tmp/found-outputs.txt /tmp/out/ 2>/dev/null || true
+
+      - name: Bundle result + patched reference file
+        run: |
+          mkdir -p /tmp/bundle
+          cp -r /tmp/out /tmp/bundle/kernel-output
+          cp -r /tmp/patched-ref /tmp/bundle/patched-source-reference
+          cd /tmp/bundle
+          zip -r /tmp/oc-build-result.zip .
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: oc-build-result
+          path: /tmp/oc-build-result.zip
+          retention-days: 7
+          
