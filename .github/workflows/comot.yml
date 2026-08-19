@@ -1,0 +1,80 @@
+name: Collect OC-Related Kernel Files
+
+on:
+  workflow_dispatch:
+    inputs:
+      branch:
+        description: 'Branch to checkout'
+        required: true
+        default: '186-master'
+
+jobs:
+  collect:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout kernel repo
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.branch }}
+          fetch-depth: 1
+
+      - name: Find and collect OC-related files
+        run: |
+          mkdir -p /tmp/oc-bundle
+
+          # 1. CPU OPP table (DTS/DTSI)
+          find . -iname "*mt6739*.dts*" -o -iname "*cpu-opp*.dts*" 2>/dev/null | while read -r f; do
+            mkdir -p "/tmp/oc-bundle/$(dirname "$f")"
+            cp "$f" "/tmp/oc-bundle/$f"
+          done
+
+          # 2. MTK cpufreq driver
+          find . -path "*power/mt6739*" -iname "*cpufreq*.c" -o -path "*power/mt6739*" -iname "*cpufreq*.h" 2>/dev/null | while read -r f; do
+            mkdir -p "/tmp/oc-bundle/$(dirname "$f")"
+            cp "$f" "/tmp/oc-bundle/$f"
+          done
+
+          # 3. Defconfig
+          find . -path "*arch/arm/configs*" -iname "*defconfig*" 2>/dev/null | while read -r f; do
+            mkdir -p "/tmp/oc-bundle/$(dirname "$f")"
+            cp "$f" "/tmp/oc-bundle/$f"
+          done
+
+          # 4. Regulator / PMIC voltage constraint dtsi
+          find . -iname "*regulator*.dts*" -o -iname "*pmic*.dts*" 2>/dev/null | while read -r f; do
+            mkdir -p "/tmp/oc-bundle/$(dirname "$f")"
+            cp "$f" "/tmp/oc-bundle/$f"
+          done
+
+          # 5. Thermal driver + thermal-zones dtsi
+          find . -path "*drivers/thermal/mediatek*" 2>/dev/null | while read -r f; do
+            if [ -f "$f" ]; then
+              mkdir -p "/tmp/oc-bundle/$(dirname "$f")"
+              cp "$f" "/tmp/oc-bundle/$f"
+            fi
+          done
+          find . -iname "*thermal-zone*.dts*" -o -iname "*thermal*.dts*" 2>/dev/null | while read -r f; do
+            mkdir -p "/tmp/oc-bundle/$(dirname "$f")"
+            cp "$f" "/tmp/oc-bundle/$f"
+          done
+
+          # Log what got picked up (helps debugging if bundle is empty/wrong)
+          echo "=== Files collected ==="
+          find /tmp/oc-bundle -type f | sort | tee /tmp/oc-bundle-filelist.txt
+
+      - name: Zip bundle
+        run: |
+          cd /tmp/oc-bundle
+          if [ -z "$(find . -type f)" ]; then
+            echo "WARNING: no matching files found, check patterns in the workflow"
+            echo "no files found" > EMPTY_README.txt
+          fi
+          zip -r /tmp/oc-files.zip . ../oc-bundle-filelist.txt 2>/dev/null || zip -r /tmp/oc-files.zip .
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: oc-related-kernel-files
+          path: /tmp/oc-files.zip
+          retention-days: 7
+          
