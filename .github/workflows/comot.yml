@@ -1,4 +1,4 @@
-name: Collect OC-Related Kernel Files
+name: Find CPU Freq Driver and OPP Tables
 
 on:
   workflow_dispatch:
@@ -9,7 +9,7 @@ on:
         default: '186-master'
 
 jobs:
-  collect:
+  search:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout kernel repo
@@ -18,63 +18,62 @@ jobs:
           ref: ${{ github.event.inputs.branch }}
           fetch-depth: 1
 
-      - name: Find and collect OC-related files
+      - name: Run search commands and log results
         run: |
-          mkdir -p /tmp/oc-bundle
+          mkdir -p /tmp/result
+          REPORT=/tmp/result/report.txt
 
-          # 1. CPU OPP table (DTS/DTSI)
-          find . -iname "*mt6739*.dts*" -o -iname "*cpu-opp*.dts*" 2>/dev/null | while read -r f; do
-            mkdir -p "/tmp/oc-bundle/$(dirname "$f")"
-            cp "$f" "/tmp/oc-bundle/$f"
-          done
+          echo "########## 1. find *cpufreq* files ##########" | tee -a "$REPORT"
+          find . -iname "*cpufreq*" -not -path "*/node_modules/*" 2>/dev/null | tee -a "$REPORT"
 
-          # 2. MTK cpufreq driver
-          find . -path "*power/mt6739*" -iname "*cpufreq*.c" -o -path "*power/mt6739*" -iname "*cpufreq*.h" 2>/dev/null | while read -r f; do
-            mkdir -p "/tmp/oc-bundle/$(dirname "$f")"
-            cp "$f" "/tmp/oc-bundle/$f"
-          done
+          echo "" | tee -a "$REPORT"
+          echo "########## 2. dts/dtsi containing operating-points / opp-table ##########" | tee -a "$REPORT"
+          grep -rln "operating-points\|opp-table\|opp-microvolt" arch/arm/boot/dts/ arch/arm64/boot/dts/mediatek/ 2>/dev/null | tee -a "$REPORT"
 
-          # 3. Defconfig
-          find . -path "*arch/arm/configs*" -iname "*defconfig*" 2>/dev/null | while read -r f; do
-            mkdir -p "/tmp/oc-bundle/$(dirname "$f")"
-            cp "$f" "/tmp/oc-bundle/$f"
-          done
+          echo "" | tee -a "$REPORT"
+          echo "########## 3. MTK DVFS / cpufreq keyword hits in drivers/ ##########" | tee -a "$REPORT"
+          grep -rln "MCUCFG\|MT_CPU_DVFS\|cpufreq_opp\|dvfs_default_freq" drivers/ 2>/dev/null | tee -a "$REPORT"
 
-          # 4. Regulator / PMIC voltage constraint dtsi
-          find . -iname "*regulator*.dts*" -o -iname "*pmic*.dts*" 2>/dev/null | while read -r f; do
-            mkdir -p "/tmp/oc-bundle/$(dirname "$f")"
-            cp "$f" "/tmp/oc-bundle/$f"
-          done
+          echo "" | tee -a "$REPORT"
+          echo "########## 4. bonus: any file/dir with 'dvfs' in the name ##########" | tee -a "$REPORT"
+          find . -iname "*dvfs*" -not -path "*/node_modules/*" 2>/dev/null | tee -a "$REPORT"
 
-          # 5. Thermal driver + thermal-zones dtsi
-          find . -path "*drivers/thermal/mediatek*" 2>/dev/null | while read -r f; do
-            if [ -f "$f" ]; then
-              mkdir -p "/tmp/oc-bundle/$(dirname "$f")"
-              cp "$f" "/tmp/oc-bundle/$f"
-            fi
-          done
-          find . -iname "*thermal-zone*.dts*" -o -iname "*thermal*.dts*" 2>/dev/null | while read -r f; do
-            mkdir -p "/tmp/oc-bundle/$(dirname "$f")"
-            cp "$f" "/tmp/oc-bundle/$f"
-          done
+          echo "" | tee -a "$REPORT"
+          echo "########## 5. bonus: mtk power/thermal driver folders ##########" | tee -a "$REPORT"
+          find . -type d -iname "*power*" -path "*mediatek*" 2>/dev/null | tee -a "$REPORT"
+          find . -type d -iname "*thermal*" -path "*mediatek*" 2>/dev/null | tee -a "$REPORT"
 
-          # Log what got picked up (helps debugging if bundle is empty/wrong)
-          echo "=== Files collected ==="
-          find /tmp/oc-bundle -type f | sort | tee /tmp/oc-bundle-filelist.txt
+          echo "" | tee -a "$REPORT"
+          echo "########## Report done ##########" | tee -a "$REPORT"
 
-      - name: Zip bundle
+      - name: Copy every file found into bundle (best-effort)
         run: |
-          cd /tmp/oc-bundle
-          if [ -z "$(find . -type f)" ]; then
-            echo "WARNING: no matching files found, check patterns in the workflow"
-            echo "no files found" > EMPTY_README.txt
-          fi
-          zip -r /tmp/oc-files.zip . ../oc-bundle-filelist.txt 2>/dev/null || zip -r /tmp/oc-files.zip .
+          mkdir -p /tmp/bundle
+          cp /tmp/result/report.txt /tmp/bundle/
+
+          # re-run each find/grep and actually copy the matched files (not just log paths)
+          collect() {
+            while IFS= read -r f; do
+              [ -f "$f" ] || continue
+              mkdir -p "/tmp/bundle/$(dirname "$f")"
+              cp "$f" "/tmp/bundle/$f"
+            done
+          }
+
+          find . -iname "*cpufreq*" -not -path "*/node_modules/*" 2>/dev/null | collect
+          grep -rln "operating-points\|opp-table\|opp-microvolt" arch/arm/boot/dts/ arch/arm64/boot/dts/mediatek/ 2>/dev/null | collect
+          grep -rln "MCUCFG\|MT_CPU_DVFS\|cpufreq_opp\|dvfs_default_freq" drivers/ 2>/dev/null | collect
+          find . -iname "*dvfs*" -not -path "*/node_modules/*" 2>/dev/null | collect
+
+      - name: Zip everything
+        run: |
+          cd /tmp/bundle
+          zip -r /tmp/cpufreq-search-results.zip .
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: oc-related-kernel-files
-          path: /tmp/oc-files.zip
+          name: cpufreq-search-results
+          path: /tmp/cpufreq-search-results.zip
           retention-days: 7
           
