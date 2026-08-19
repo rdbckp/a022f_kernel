@@ -1,4 +1,4 @@
-name: Find CPU Freq Driver and OPP Tables
+name: Fetch CPUFreq Config Files (Read-Only)
 
 on:
   workflow_dispatch:
@@ -9,71 +9,32 @@ on:
         default: '186-master'
 
 jobs:
-  search:
+  fetch:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout kernel repo
+      - name: Checkout kernel repo (read-only, nothing pushed back)
         uses: actions/checkout@v4
         with:
           ref: ${{ github.event.inputs.branch }}
           fetch-depth: 1
 
-      - name: Run search commands and log results
-        run: |
-          mkdir -p /tmp/result
-          REPORT=/tmp/result/report.txt
-
-          echo "########## 1. find *cpufreq* files ##########" | tee -a "$REPORT"
-          find . -iname "*cpufreq*" -not -path "*/node_modules/*" 2>/dev/null | tee -a "$REPORT"
-
-          echo "" | tee -a "$REPORT"
-          echo "########## 2. dts/dtsi containing operating-points / opp-table ##########" | tee -a "$REPORT"
-          grep -rln "operating-points\|opp-table\|opp-microvolt" arch/arm/boot/dts/ arch/arm64/boot/dts/mediatek/ 2>/dev/null | tee -a "$REPORT"
-
-          echo "" | tee -a "$REPORT"
-          echo "########## 3. MTK DVFS / cpufreq keyword hits in drivers/ ##########" | tee -a "$REPORT"
-          grep -rln "MCUCFG\|MT_CPU_DVFS\|cpufreq_opp\|dvfs_default_freq" drivers/ 2>/dev/null | tee -a "$REPORT"
-
-          echo "" | tee -a "$REPORT"
-          echo "########## 4. bonus: any file/dir with 'dvfs' in the name ##########" | tee -a "$REPORT"
-          find . -iname "*dvfs*" -not -path "*/node_modules/*" 2>/dev/null | tee -a "$REPORT"
-
-          echo "" | tee -a "$REPORT"
-          echo "########## 5. bonus: mtk power/thermal driver folders ##########" | tee -a "$REPORT"
-          find . -type d -iname "*power*" -path "*mediatek*" 2>/dev/null | tee -a "$REPORT"
-          find . -type d -iname "*thermal*" -path "*mediatek*" 2>/dev/null | tee -a "$REPORT"
-
-          echo "" | tee -a "$REPORT"
-          echo "########## Report done ##########" | tee -a "$REPORT"
-
-      - name: Copy every file found into bundle (best-effort)
+      - name: Bundle target files
         run: |
           mkdir -p /tmp/bundle
-          cp /tmp/result/report.txt /tmp/bundle/
+          SRC=drivers/misc/mediatek/base/power/cpufreq_v2/src/mach/mt6739
+          mkdir -p "/tmp/bundle/$SRC"
+          cp "$SRC/mtk_cpufreq_config.h" "/tmp/bundle/$SRC/" 2>/dev/null || echo "config.h not found at expected path" > /tmp/bundle/CONFIG_H_MISSING.txt
+          cp "$SRC/mtk_cpufreq_platform.c" "/tmp/bundle/$SRC/" 2>/dev/null || echo "platform.c not found at expected path" > /tmp/bundle/PLATFORM_C_MISSING.txt
+          cp "$SRC/mtk_cpufreq_opp_table.h" "/tmp/bundle/$SRC/" 2>/dev/null
+          cp "$SRC/mtk_cpufreq_debug.h" "/tmp/bundle/$SRC/" 2>/dev/null
 
-          # re-run each find/grep and actually copy the matched files (not just log paths)
-          collect() {
-            while IFS= read -r f; do
-              [ -f "$f" ] || continue
-              mkdir -p "/tmp/bundle/$(dirname "$f")"
-              cp "$f" "/tmp/bundle/$f"
-            done
-          }
-
-          find . -iname "*cpufreq*" -not -path "*/node_modules/*" 2>/dev/null | collect
-          grep -rln "operating-points\|opp-table\|opp-microvolt" arch/arm/boot/dts/ arch/arm64/boot/dts/mediatek/ 2>/dev/null | collect
-          grep -rln "MCUCFG\|MT_CPU_DVFS\|cpufreq_opp\|dvfs_default_freq" drivers/ 2>/dev/null | collect
-          find . -iname "*dvfs*" -not -path "*/node_modules/*" 2>/dev/null | collect
-
-      - name: Zip everything
-        run: |
-          cd /tmp/bundle
-          zip -r /tmp/cpufreq-search-results.zip .
+      - name: Zip
+        run: cd /tmp/bundle && zip -r /tmp/cpufreq-config-files.zip .
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: cpufreq-search-results
-          path: /tmp/cpufreq-search-results.zip
+          name: cpufreq-config-files
+          path: /tmp/cpufreq-config-files.zip
           retention-days: 7
           
