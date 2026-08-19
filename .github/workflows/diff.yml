@@ -1,0 +1,97 @@
+name: Extract Kernel Diff Files
+
+on:
+  workflow_dispatch:
+    inputs:
+      repo_a:
+        description: 'Repo A (format: owner/repo)'
+        required: true
+        default: 'Takumi123w/kernel-a01c'
+      ref_a:
+        description: 'Branch/tag repo A'
+        required: true
+        default: 'master'
+      repo_b:
+        description: 'Repo B (format: owner/repo)'
+        required: true
+        default: 'rdbckp/a022f_kernel'
+      ref_b:
+        description: 'Branch/tag repo B'
+        required: true
+        default: '186-master'
+      release_tag:
+        description: 'Tag buat release'
+        required: true
+        default: 'diff-extract'
+
+jobs:
+  extract:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repo A
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ github.event.inputs.repo_a }}
+          ref: ${{ github.event.inputs.ref_a }}
+          path: repo_a
+          fetch-depth: 1
+
+      - name: Checkout Repo B
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ github.event.inputs.repo_b }}
+          ref: ${{ github.event.inputs.ref_b }}
+          path: repo_b
+          fetch-depth: 1
+
+      - name: Kumpulin file penting
+        run: |
+          mkdir -p extracted/repo_a extracted/repo_b
+
+          for REPO in repo_a repo_b; do
+            mkdir -p extracted/$REPO/configs
+            mkdir -p extracted/$REPO/mediatek_drivers
+            mkdir -p extracted/$REPO/dts
+            mkdir -p extracted/$REPO/security
+
+            # Defconfig
+            find $REPO -path "*/configs/*defconfig*" -exec cp --parents {} extracted/$REPO/ \; 2>/dev/null || true
+
+            # Driver MediaTek
+            [ -d "$REPO/drivers/misc/mediatek" ] && cp -r $REPO/drivers/misc/mediatek extracted/$REPO/mediatek_drivers/ || true
+
+            # DTS/DTSI (board files)
+            find $REPO -name "*.dts" -o -name "*.dtsi" | grep -i -E "mt6739|a01|a02" | xargs -I{} cp --parents {} extracted/$REPO/ 2>/dev/null || true
+
+            # Samsung security stuff (sec_debug, TIMA, Knox)
+            find $REPO -iname "*sec_debug*" -o -iname "*tima*" -o -iname "*knox*" | xargs -I{} cp --parents {} extracted/$REPO/security/ 2>/dev/null || true
+
+            # Board config / Makefile utama
+            find $REPO -maxdepth 2 -iname "Makefile" -o -maxdepth 2 -iname "Kconfig" | xargs -I{} cp --parents {} extracted/$REPO/ 2>/dev/null || true
+          done
+
+      - name: Zip hasil
+        run: |
+          cd extracted
+          zip -r ../kernel_diff_files.zip .
+          cd ..
+          zip -r kernel_diff_files.zip repo_a/README* repo_b/README* 2>/dev/null || true
+
+      - name: Upload sebagai artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: kernel-diff-files
+          path: kernel_diff_files.zip
+
+      - name: Buat Release + upload zip
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event.inputs.release_tag }}-${{ github.run_number }}
+          name: Kernel Diff Extract ${{ github.run_number }}
+          files: kernel_diff_files.zip
+          body: |
+            Extract dari:
+            - ${{ github.event.inputs.repo_a }}@${{ github.event.inputs.ref_a }}
+            - ${{ github.event.inputs.repo_b }}@${{ github.event.inputs.ref_b }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
