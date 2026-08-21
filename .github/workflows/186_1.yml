@@ -70,7 +70,14 @@ jobs:
           FILE="drivers/spi/spi-mt65xx.c"
 
           # Cek dulu biar idempotent, jangan sampai double-insert kalau workflow dijalanin ulang
-          if grep -q "SPI_ADJUST_CFG0_SCK_LOW_OFFSET" "$FILE"; then
+          # PENTING: jangan cuma grep nama macro-nya doang, karena macro itu
+          # DIPAKAI di file ini (SPI_ADJUST_CFG0_SCK_LOW_OFFSET dipanggil di
+          # kode asli tapi belum pernah didefinisikan). Grep sebelumnya salah
+          # kira "sudah ada" padahal yang ketemu itu baris PEMAKAIAN, bukan
+          # definisinya -- akibatnya #define nggak pernah ke-insert dan build
+          # gagal "use of undeclared identifier". Sekarang grep khusus nyari
+          # baris "#define" nya biar idempotent-check-nya bener.
+          if grep -q "^#define SPI_ADJUST_CFG0_SCK_LOW_OFFSET" "$FILE"; then
             echo "Guard sudah ada, skip insert."
           else
             # Anchor ke #include terakhir, bukan nomor baris statis (nomor baris gampang geser abis patch)
@@ -80,6 +87,13 @@ jobs:
 
           echo "--- Preview hasil insert ---"
           grep -n -A3 -B3 "SPI_ADJUST_CFG0_SCK_LOW_OFFSET" "$FILE"
+
+          # Gate: pastikan #define-nya beneran ada di file sebelum lanjut build,
+          # biar gagalnya cepat ketauan di sini, bukan nyangkut 10+ menit di step Build.
+          if ! grep -q "^#define SPI_ADJUST_CFG0_SCK_LOW_OFFSET" "$FILE"; then
+            echo "::error::#define SPI_ADJUST_CFG0_SCK_LOW_OFFSET tetap tidak ditemukan di $FILE setelah insert."
+            exit 1
+          fi
 
       - name: Build Kernel
         run: |
