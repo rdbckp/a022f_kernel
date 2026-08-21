@@ -1,0 +1,78 @@
+name: Build +1
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Source Kernel
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Install Toolchain & Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y bc build-essential flex bison libssl-dev libelf-dev gcc-arm-linux-gnueabi
+
+      - name: Apply Upstream Patch (v186 to v190)
+        run: |
+          CURRENT_SUBLEVEL=$(grep "^SUBLEVEL =" Makefile | awk '{print $3}')
+
+          if [ "$CURRENT_SUBLEVEL" -eq "190" ]; then
+            echo "Sudah di v190, skip patch."
+          else
+            git remote add stable https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux-stable.git || true
+            git fetch stable tag v4.14.186 tag v4.14.190 --no-tags --depth 1
+            git diff v4.14.186 v4.14.190 -- arch/arm/ drivers/ include/ kernel/ mm/ net/ sound/ Makefile > p190_clean.patch
+
+            # Kalau patch gagal, langsung stop build. Jangan lanjut dengan tree yang setengah-setengah.
+            if patch -p1 --forward --batch < p190_clean.patch; then
+              echo "Patch berhasil diterapkan."
+            else
+              echo "::error::Patch GAGAL diterapkan. Cek p190_clean.patch dan konflik manual."
+              exit 1
+            fi
+          fi
+
+      - name: Verify Patch Result
+        run: |
+          NEW_SUBLEVEL=$(grep "^SUBLEVEL =" Makefile | awk '{print $3}')
+          echo "SUBLEVEL sekarang: $NEW_SUBLEVEL"
+          if [ "$NEW_SUBLEVEL" -ne "190" ]; then
+            echo "::error::SUBLEVEL bukan 190 setelah patch, ada yang salah."
+            exit 1
+          fi
+
+      - name: Fix MediaTek SPI Header (The Dirty Way)
+        run: |
+          FILE="drivers/spi/spi-mt65xx.c"
+
+          # Cek dulu biar idempotent, jangan sampai double-insert kalau workflow dijalanin ulang
+          if grep -q "SPI_ADJUST_CFG0_SCK_LOW_OFFSET" "$FILE"; then
+            echo "Guard sudah ada, skip insert."
+          else
+            # Anchor ke #include terakhir, bukan nomor baris statis (nomor baris gampang geser abis patch)
+            sed -i '0,/^#include/! {/^#include/!b}; /^#include/{x;/./d;x;h}' "$FILE" 2>/dev/null || true
+            LAST_INCLUDE_LINE=$(grep -n '^#include' "$FILE" | tail -1 | cut -d: -f1)
+            sed -i "${LAST_INCLUDE_LINE}a\\
+#ifndef SPI_ADJUST_CFG0_SCK_LOW_OFFSET\\
+#define SPI_ADJUST_CFG0_SCK_LOW_OFFSET 0\\
+#endif" "$FILE"
+          fi
+
+          echo "--- Preview hasil insert ---"
+          grep -n -A3 -B3 "SPI_ADJUST_CFG0_SCK_LOW_OFFSET" "$FILE"
+
+      - name: Build Kernel
+        run: |
+          chmod +x z
+          ./z
+
+      - name: Upload zImage
+        uses: actions/upload-artifact@v4
+        with:
+          name: RooXie-v190
+          path: out/arch/arm/boot/zImage
+          
