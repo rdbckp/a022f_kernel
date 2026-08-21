@@ -1,4 +1,4 @@
-name: Build Up
+name: Build +1
 on:
   workflow_dispatch:
 
@@ -54,12 +54,8 @@ jobs:
             echo "Guard sudah ada, skip insert."
           else
             # Anchor ke #include terakhir, bukan nomor baris statis (nomor baris gampang geser abis patch)
-            sed -i '0,/^#include/! {/^#include/!b}; /^#include/{x;/./d;x;h}' "$FILE" 2>/dev/null || true
             LAST_INCLUDE_LINE=$(grep -n '^#include' "$FILE" | tail -1 | cut -d: -f1)
-            sed -i "${LAST_INCLUDE_LINE}a\\
-            #ifndef SPI_ADJUST_CFG0_SCK_LOW_OFFSET\\
-            #define SPI_ADJUST_CFG0_SCK_LOW_OFFSET 0\\
-            #endif" "$FILE"
+            awk -v n="$LAST_INCLUDE_LINE" '{print} NR==n {print "#ifndef SPI_ADJUST_CFG0_SCK_LOW_OFFSET"; print "#define SPI_ADJUST_CFG0_SCK_LOW_OFFSET 0"; print "#endif"}' "$FILE" > "$FILE.tmp" && mv "$FILE.tmp" "$FILE"
           fi
 
           echo "--- Preview hasil insert ---"
