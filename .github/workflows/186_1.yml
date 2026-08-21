@@ -57,9 +57,9 @@ jobs:
             sed -i '0,/^#include/! {/^#include/!b}; /^#include/{x;/./d;x;h}' "$FILE" 2>/dev/null || true
             LAST_INCLUDE_LINE=$(grep -n '^#include' "$FILE" | tail -1 | cut -d: -f1)
             sed -i "${LAST_INCLUDE_LINE}a\\
-#ifndef SPI_ADJUST_CFG0_SCK_LOW_OFFSET\\
-#define SPI_ADJUST_CFG0_SCK_LOW_OFFSET 0\\
-#endif" "$FILE"
+            #ifndef SPI_ADJUST_CFG0_SCK_LOW_OFFSET\\
+            #define SPI_ADJUST_CFG0_SCK_LOW_OFFSET 0\\
+            #endif" "$FILE"
           fi
 
           echo "--- Preview hasil insert ---"
