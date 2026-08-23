@@ -15,7 +15,7 @@ jobs:
       - name: Install Toolchain & Dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y bc build-essential flex bison libssl-dev libelf-dev gcc-arm-linux-gnueabi
+          sudo apt-get install -y bc build-essential flex bison libssl-dev libelf-dev gcc-arm-linux-gnueabi zip
 
       - name: Apply Upstream Patch (v186 to v200)
         run: |
@@ -259,6 +259,124 @@ jobs:
             exit 1
           fi
 
+      - name: Fix mm/memory.c (cow_user_page argument mismatch)
+        run: |
+          FILE="mm/memory.c"
+          # BUG NYATA yang kelewat di audit sebelumnya (mohon maaf atas
+          # kesalahan ini) -- ketauan dari compile error asli waktu build
+          # v200 pertama gagal: "too many arguments to function call,
+          # expected 3, have 4" di mm/memory.c:2770.
+          #
+          # Kejadiannya: hunk yang mengubah DEFINISI cow_user_page() dari
+          # signature lama (4 argumen, void) ke signature baru (3 argumen,
+          # mengembalikan bool) BERHASIL diterapkan, tapi hunk yang
+          # SEHARUSNYA mengupdate PEMANGGILNYA di wp_page_copy() GAGAL
+          # (karena vendor tree pakai nama variabel new_page/old_page,
+          # bukan dst/src seperti upstream). Hasilnya: definisi sudah
+          # 3-argumen tapi pemanggilnya masih kirim 4 argumen -- gagal
+          # compile. Idempotent.
+          if grep -q "if (!cow_user_page(new_page, old_page, vmf)) {" "$FILE"; then
+            echo "Sudah ditambal, skip."
+          elif grep -q "cow_user_page(new_page, old_page, vmf->address, vma);" "$FILE"; then
+            python3 - "$FILE" <<'PYEOF'
+          import sys
+          path = sys.argv[1]
+          with open(path) as f:
+              content = f.read()
+          old = "\t\tcow_user_page(new_page, old_page, vmf->address, vma);\n\t}\n"
+          new = (
+              "\t\tif (!cow_user_page(new_page, old_page, vmf)) {\n"
+              "\t\t\t/*\n"
+              "\t\t\t * COW failed, if the fault was solved by other,\n"
+              "\t\t\t * it's fine. If not, userspace would re-fault on\n"
+              "\t\t\t * the same address and we will handle the fault\n"
+              "\t\t\t * from the second attempt.\n"
+              "\t\t\t */\n"
+              "\t\t\tput_page(new_page);\n"
+              "\t\t\tif (old_page)\n"
+              "\t\t\t\tput_page(old_page);\n"
+              "\t\t\treturn 0;\n"
+              "\t\t}\n"
+              "\t}\n"
+          )
+          if old not in content:
+              print("::error::Pola pemanggilan cow_user_page lama tidak ditemukan persis.")
+              sys.exit(1)
+          content = content.replace(old, new)
+          with open(path, "w") as f:
+              f.write(content)
+          print("Pemanggilan cow_user_page() ditambal ke signature baru.")
+          PYEOF
+          else
+            echo "::error::Pola cow_user_page di $FILE tidak dikenali (lama maupun baru). Cek manual."
+            exit 1
+          fi
+
+          if ! grep -q "if (!cow_user_page(new_page, old_page, vmf)) {" "$FILE"; then
+            echo "::error::Fix cow_user_page gagal diverifikasi setelah diterapkan."
+            exit 1
+          fi
+
+      - name: Fix include/linux/overflow.h (duplicate definitions)
+        run: |
+          FILE="include/linux/overflow.h"
+          # BUG NYATA lain yang kelewat di audit (compile error asli:
+          # "redefinition of 'array_size'" dst di fs/f2fs/dir.o). Beda
+          # dari bug-bug lain di atas -- ini BUKAN dari hunk yang gagal,
+          # tapi dari hunk yang "berhasil" diterapkan patch (exit sukses)
+          # padahal vendor tree SUDAH punya blok array_size()/array3_size()/
+          # __ab_c_size() ini sebelumnya (offset context-matching patch
+          # sampai 73 baris karena tree sudah divergen jauh), jadi hasilnya
+          # BUKAN update di tempat yang benar, malah nambah BLOK KEDUA yang
+          # identik persis di bawahnya -- duplicate symbol, gagal compile.
+          # Pelajaran: hunk yang "sukses" dengan offset besar juga tetap
+          # perlu diverifikasi, bukan cuma yang gagal/.rej.
+          #
+          # Fix: hapus blok duplikat kedua, sisakan satu saja. Idempotent
+          # (cuma jalan kalau beneran ketemu 2 salinan persis).
+          COUNT=$(grep -c "^static inline __must_check size_t array_size" "$FILE" || true)
+
+          if [ "$COUNT" -eq 1 ]; then
+            echo "Cuma ada 1 definisi array_size(), sudah bersih. Skip."
+          elif [ "$COUNT" -ge 2 ]; then
+            python3 - "$FILE" <<'PYEOF'
+          import sys
+          path = sys.argv[1]
+          with open(path) as f:
+              lines = f.readlines()
+
+          marker = "array_size() - Calculate size of 2-dimensional array.\n"
+          occurrences = [i for i, l in enumerate(lines) if marker in l]
+          if len(occurrences) < 2:
+              print("::error::Kurang dari 2 blok array_size ditemukan, pola berubah.")
+              sys.exit(1)
+
+          # Blok kedua dimulai dari baris comment "/**" tepat sebelum
+          # occurrence kedua, dan berakhir tepat sebelum baris "#endif"
+          # penutup file.
+          second_start = occurrences[1] - 1  # baris "/**"
+          endif_idx = next(i for i in range(len(lines) - 1, -1, -1) if lines[i].strip().startswith("#endif"))
+
+          if not lines[second_start].strip().startswith("/**"):
+              print("::error::Baris sebelum blok duplikat kedua bukan '/**' seperti yang diharapkan.")
+              sys.exit(1)
+
+          new_lines = lines[:second_start] + lines[endif_idx:]
+          with open(path, "w") as f:
+              f.writelines(new_lines)
+          print(f"Blok duplikat (baris {second_start+1}-{endif_idx}) dihapus.")
+          PYEOF
+          else
+            echo "::error::array_size() tidak ditemukan sama sekali di $FILE. Cek manual."
+            exit 1
+          fi
+
+          FINAL_COUNT=$(grep -c "^static inline __must_check size_t array_size" "$FILE" || true)
+          if [ "$FINAL_COUNT" -ne 1 ]; then
+            echo "::error::Masih ada $FINAL_COUNT definisi array_size() setelah fix (harusnya 1)."
+            exit 1
+          fi
+
       - name: Generate Changelog
         run: |
           # Auto-generate changelog dari commit log resmi v4.14.186->v4.14.200
@@ -299,38 +417,4 @@ jobs:
             echo
             echo "- spi: mediatek: perbaiki reg_val yang tidak terinisialisasi di mtk_spi_prepare_transfer()"
             echo "  (penyebab hang-di-boot-logo waktu upgrade ke v190, ditambal juga di sini karena"
-            echo "  hunk register-timing upstream tidak applicable ke fungsi vendor yang sudah dimodifikasi)"
-            echo "- usb: xhci-mtk: hapus duplicate pm_runtime_put_noidle()+pm_runtime_disable() di xhci_mtk_remove()"
-            echo
-            echo "## Known gaps (aman di-skip, non-boot-blocking, bisa direvisit)"
-            echo
-            echo "- android: binder: self-transaction WARN_ON check belum di-backport"
-            echo "- mm: cow_user_page() race-condition hardening belum di-backport"
-            echo "- HID: beberapa defensive-programming fix (hid-core/hid-input/hid-multitouch) belum di-backport"
-            echo
-          } > CHANGELOG.txt
-
-          cat CHANGELOG.txt
-
-      - name: Build Kernel
-        run: |
-          chmod +x z
-          ./z
-
-      - name: Package Output
-        run: |
-          cd out/arch/arm/boot
-          if [ -f "zImage-dtb" ]; then
-            cp zImage-dtb boot.img-kernel
-          else
-            echo "::warning::zImage-dtb tidak ditemukan, fallback ke zImage (DTB terpisah)."
-            cp zImage boot.img-kernel
-          fi
-          cp "$GITHUB_WORKSPACE/CHANGELOG.txt" .
-          zip RooXie-v200.zip boot.img-kernel CHANGELOG.txt
-
-      - name: Upload Kernel
-        uses: actions/upload-artifact@v4
-        with:
-          name: RooXie-v200
-          path: out/arch/arm/boot/RooXie-v200.zip
+            echo "  hunk register-timing upstream tidak applicable ke fungsi vendor yang
