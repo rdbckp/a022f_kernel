@@ -1,4 +1,5 @@
 name: Build Up
+
 on:
   workflow_dispatch:
 
@@ -49,33 +50,24 @@ jobs:
 
             if [ "$FETCH_OK" -eq 0 ]; then
               # PENTING: jangan bikin build gagal total cuma karena upstream
-              # server (git.kernel.org & mirror-nya) lagi down. Terbukti dari
-              # main.yml, build TANPA patch ini juga jalan normal (touchscreen
-              # normal). Jadi kalau fetch gagal total, skip patch aja, tetap
-              # di v186, dan lanjut build -- bukan exit 1.
-              echo "::warning::Semua sumber patch gagal diakses. Skip patch v186->v190, lanjut build di v186 (terbukti aman berdasarkan build referensi tanpa patch ini)."
+              # server (git.kernel.org & mirror-nya) lagi down. Skip patch
+              # aja, tetap di v186, dan lanjut build -- bukan exit 1.
+              echo "::warning::Semua sumber patch gagal diakses. Skip patch v186->v190, lanjut build di v186."
             else
               git diff v4.14.186 v4.14.190 -- arch/arm/ drivers/ include/ kernel/ mm/ net/ sound/ Makefile > p190_clean.patch
 
-              # PENTING: jangan hard-fail cuma karena exit code patch != 0.
-              # Beberapa file (contoh: sound/usb/*) sering udah di-backport duluan
-              # sama vendor tree Samsung, jadi patch bakal bilang "Reversed (or
-              # previously applied) patch detected! Skipping patch." itu AMAN,
-              # bukan error beneran. Makanya set +e di sini, exit code asli cuma
-              # dicatat, keputusan pass/fail sebenernya ditentuin di step
-              # "Verify Patch Result" lewat cek SUBLEVEL.
+              # PENTING: exit code patch != 0 itu WAJAR (banyak file udah
+              # di-backport duluan sama vendor tree Samsung/MTK, sebagian malah
+              # lebih baru dari v190). set +e di sini cuma supaya step ini
+              # nggak mati di tengah jalan -- keputusan pass/fail SEBENARNYA
+              # ada di step "Verify Patch Result" berikutnya, yang mengecek
+              # SETIAP .rej satu per satu, bukan cuma nomor SUBLEVEL.
               set +e
               patch -p1 --forward --batch < p190_clean.patch
               PATCH_EXIT=$?
               set -e
 
-              echo "Exit code patch: $PATCH_EXIT (nonzero itu wajar kalau ada hunk yang di-skip karena sudah diterapkan sebelumnya)"
-
-              REJECTS=$(find . -name "*.rej" 2>/dev/null)
-              if [ -n "$REJECTS" ]; then
-                echo "::warning::Ada hunk yang di-reject (biasanya karena sudah ada di source, cek manual kalau ragu):"
-                echo "$REJECTS"
-              fi
+              echo "Exit code patch: $PATCH_EXIT (nonzero itu wajar kalau ada hunk yang di-skip karena sudah diterapkan/di-backport sebelumnya)"
             fi
           fi
 
@@ -84,10 +76,6 @@ jobs:
           NEW_SUBLEVEL=$(grep "^SUBLEVEL =" Makefile | awk '{print $3}')
           echo "SUBLEVEL sekarang: $NEW_SUBLEVEL"
 
-          # Gate ini sekarang cuma informatif, bukan blocker.
-          # v186 tanpa patch TERBUKTI aman (rujukan: main.yml, touchscreen normal).
-          # Jadi kalau SUBLEVEL masih 186 karena patch di-skip (network issue),
-          # itu bukan kegagalan -- cuma dicatat di log.
           if [ "$NEW_SUBLEVEL" -eq "190" ]; then
             echo "Patch v190 berhasil diterapkan."
           elif [ "$NEW_SUBLEVEL" -eq "186" ]; then
@@ -97,22 +85,198 @@ jobs:
             exit 1
           fi
 
+          # ============================================================
+          # GATE UTAMA: setiap .rej WAJIB dikenali sebelum build lanjut.
+          # Kejadian kemarin (v190 upgrade hang di boot logo) itu penyebabnya
+          # persis di sini: .rej dihapus diam-diam tanpa dicek, jadi kernel
+          # yang dibuild itu campuran v186/v190 yang nggak konsisten.
+          #
+          # Daftar di bawah ini sudah diverifikasi manual satu-satu dengan
+          # cara clone repo ini + replay patch yang sama, lihat isi file
+          # aslinya kena apa:
+          #
+          #   - Makefile.rej                         -> FALSE POSITIVE.
+          #     Vendor tree sudah punya fix yang sama (CLANG_FLAGS --prefix),
+          #     cuma konteks diff-nya beda dikit. Aman, nggak perlu apa-apa.
+          #
+          #   - include/linux/mod_devicetable.h.rej  -> FALSE POSITIVE.
+          #     INPUT_DEVICE_ID_SW_MAX di vendor tree sudah 0x3f, sementara
+          #     v190 vanilla cuma minta 0x10 -- vendor tree JUSTRU LEBIH BARU
+          #     dari v190 di titik ini. JANGAN ditimpa nilai v190, itu malah
+          #     mundur/regresi.
+          #
+          #   - include/uapi/linux/input-event-codes.h.rej -> FALSE POSITIVE.
+          #     Vendor tree sudah punya lebih banyak definisi custom di area
+          #     ini, nomor baris & konteksnya nggak sebanding sama vanilla.
+          #     Jangan ditempel buta.
+          #
+          #   - drivers/block/loop.c.rej             -> "Reversed (or
+          #     previously applied)" = sudah di-backport vendor. Aman.
+          #
+          #   - sound/usb/card.h.rej, endpoint.c.rej, endpoint.h.rej,
+          #     pcm.c.rej                              -> sama, sudah
+          #     di-backport vendor (USB audio). Aman.
+          #
+          # File YANG BENERAN BUG dan sekarang ditambal manual di step
+          # berikutnya (bukan di-skip): drivers/usb/host/xhci-mtk.c dan
+          # drivers/spi/spi-mt65xx.c. Makanya keduanya TIDAK ada di
+          # whitelist ini -- kalau nanti ternyata masih ada .rej dari file
+          # ini pun harus lolos lewat fix manual, bukan lewat whitelist.
+          # ============================================================
+          KNOWN_SAFE_REJECTS="
+          ./Makefile.rej
+          ./include/linux/mod_devicetable.h.rej
+          ./include/uapi/linux/input-event-codes.h.rej
+          ./drivers/block/loop.c.rej
+          ./sound/usb/card.h.rej
+          ./sound/usb/endpoint.c.rej
+          ./sound/usb/endpoint.h.rej
+          ./sound/usb/pcm.c.rej
+          "
+
+          ALL_REJECTS=$(find . -name "*.rej" 2>/dev/null)
+          UNEXPECTED_REJECTS=""
+
+          for f in $ALL_REJECTS; do
+            if ! echo "$KNOWN_SAFE_REJECTS" | grep -qxF "$f"; then
+              UNEXPECTED_REJECTS="$UNEXPECTED_REJECTS $f"
+            fi
+          done
+
+          if [ -n "$UNEXPECTED_REJECTS" ]; then
+            echo "::error::Ada .rej BARU yang belum pernah diverifikasi manual. Build DIHENTIKAN supaya nggak ngulang kejadian v190 hang-di-logo:"
+            for f in $UNEXPECTED_REJECTS; do
+              echo "  - $f"
+              cat "$f"
+            done
+            echo "::error::Cek manual isi file di atas (bandingkan sama upstream v4.14.186 -> v4.14.190), pastikan itu false positive (vendor sudah lebih baru) atau tambal manual sebelum lanjut, lalu update whitelist KNOWN_SAFE_REJECTS di step ini."
+            exit 1
+          fi
+
+          echo "Semua .rej yang ada sudah dikenali dan diverifikasi aman."
           find . -name "*.rej" -delete 2>/dev/null || true
 
-      - name: Fix MediaTek SPI Header (The Dirty Way)
+      - name: Fix drivers/spi/spi-mt65xx.c (uninitialized reg_val)
+        run: |
+          FILE="drivers/spi/spi-mt65xx.c"
+
+          # BUG NYATA, dikonfirmasi dengan cara replay patch v186->v190 di
+          # atas repo asli: hunk yang MENGHAPUS inisialisasi
+          # "reg_val = 0" -> "reg_val" itu BERHASIL diterapkan, tapi hunk
+          # yang SEHARUSNYA mengganti logic reg_val (supaya first-use-nya
+          # jadi assignment "=", bukan OR "|=") GAGAL diterapkan, karena
+          # fungsi mtk_spi_prepare_transfer() di vendor tree ini sudah
+          # dimodifikasi (ada parameter spi_device* & cs_setuptime/holdtime/
+          # idletime per-chip yang nggak ada di vanilla upstream).
+          #
+          # Hasilnya: reg_val dipakai lewat "|=" pada penggunaan PERTAMA,
+          # padahal nggak pernah diinisialisasi -- classic uninitialized
+          # stack variable, lalu ditulis langsung ke register hardware SPI
+          # (SPI_CFG2_REG / SPI_CFG0_REG) lewat writel(). Ini undefined
+          # behavior nyata di jalur init SPI controller, bukan cuma warning
+          # kosmetik.
+          #
+          # Fix: kembalikan inisialisasi eksplisit "reg_val = 0" di
+          # deklarasi, seperti sebelum di-upgrade. Idempotent -- kalau
+          # inisialisasi sudah ada (build ulang / SUBLEVEL masih 186), skip.
+          if grep -q "u32 spi_clk_hz, div, sck_time, cs_time, reg_val = 0;" "$FILE"; then
+            echo "reg_val sudah terinisialisasi, skip."
+          elif grep -q "u32 spi_clk_hz, div, sck_time, cs_time, reg_val;" "$FILE"; then
+            sed -i 's/u32 spi_clk_hz, div, sck_time, cs_time, reg_val;/u32 spi_clk_hz, div, sck_time, cs_time, reg_val = 0;/' "$FILE"
+            echo "Inisialisasi reg_val = 0 dikembalikan."
+          else
+            echo "::error::Deklarasi reg_val di $FILE nggak ketemu pola yang diharapkan -- kemungkinan struktur fungsi sudah berubah lagi. Cek manual, jangan lanjut build buta."
+            exit 1
+          fi
+
+          echo "--- Preview hasil fix ---"
+          grep -n -A2 "reg_val = 0;" "$FILE" | head -6
+
+          if ! grep -q "u32 spi_clk_hz, div, sck_time, cs_time, reg_val = 0;" "$FILE"; then
+            echo "::error::reg_val masih belum terinisialisasi setelah fix di $FILE."
+            exit 1
+          fi
+
+      - name: Fix drivers/usb/host/xhci-mtk.c (duplicate pm_runtime call)
+        run: |
+          FILE="drivers/usb/host/xhci-mtk.c"
+
+          # BUG NYATA, dikonfirmasi sama cara: hunk yang MENAMBAH blok baru
+          # "pm_runtime_put_noidle(&dev->dev); pm_runtime_disable(&dev->dev);"
+          # di awal xhci_mtk_remove() BERHASIL diterapkan, tapi hunk yang
+          # SEHARUSNYA MENGHAPUS blok lama yang setara di akhir fungsi GAGAL
+          # (karena vendor tree ini ternyata sudah pakai put_noidle juga di
+          # situ, bukan put_sync seperti asumsi patch upstream -- jadi
+          # konteksnya nggak match). Hasilnya: xhci_mtk_remove() sekarang
+          # manggil pm_runtime_put_noidle()+pm_runtime_disable() DUA KALI.
+          #
+          # Ini bukan penyebab hang-di-logo (fungsi ini cuma jalan pas
+          # device di-remove/rmmod/suspend, bukan cold boot), tapi tetap
+          # bug nyata: pm_runtime_disable() dipanggil dobel bisa bikin
+          # refcount pm_runtime underflow/WARN_ON pas suspend atau rmmod.
+          # Ditambal sekalian di sini biar tree konsisten dan nggak nyisain
+          # utang teknis buat rebuild berikutnya.
+          #
+          # Fix: hapus blok kedua (yang di akhir fungsi, sebelum
+          # usb_remove_hcd(shared_hcd)), pertahankan blok pertama (yang
+          # baru ditambahkan lewat hunk yang berhasil di awal fungsi).
+          COUNT=$(grep -c "pm_runtime_put_noidle(&dev->dev);" "$FILE" || true)
+
+          if [ "$COUNT" -eq 1 ]; then
+            echo "Cuma ada 1 pemanggilan, sudah bersih. Skip."
+          elif [ "$COUNT" -ge 2 ]; then
+            python3 - "$FILE" <<'PYEOF'
+          import sys
+          path = sys.argv[1]
+          with open(path) as f:
+              content = f.read()
+
+          block = "\tpm_runtime_put_noidle(&dev->dev);\n\tpm_runtime_disable(&dev->dev);\n\n"
+          first = content.find(block)
+          second = content.find(block, first + len(block))
+
+          if first == -1 or second == -1:
+              print("::error::Pola blok duplikat tidak ditemukan persis seperti yang diharapkan.")
+              sys.exit(1)
+
+          content = content[:second] + content[second + len(block):]
+          with open(path, "w") as f:
+              f.write(content)
+          print("Blok duplikat kedua dihapus.")
+          PYEOF
+          else
+            echo "::error::pm_runtime_put_noidle tidak ditemukan sama sekali di $FILE -- struktur fungsi kemungkinan berubah. Cek manual."
+            exit 1
+          fi
+
+          echo "--- Preview hasil fix ---"
+          grep -n -B1 -A1 "pm_runtime_put_noidle(&dev->dev);" "$FILE"
+
+          FINAL_COUNT=$(grep -c "pm_runtime_put_noidle(&dev->dev);" "$FILE" || true)
+          if [ "$FINAL_COUNT" -ne 1 ]; then
+            echo "::error::Masih ada $FINAL_COUNT pemanggilan pm_runtime_put_noidle setelah fix (harusnya 1)."
+            exit 1
+          fi
+
+      - name: Fix MediaTek SPI Timing Offset
         run: |
           FILE="drivers/spi/spi-mt65xx.c"
 
           # NILAI YANG BENAR: 16, bukan 0.
           # Dikonfirmasi dari patch resmi MediaTek "spi: mediatek: adjust
-          # register to enhance time accuracy" (Leilk Liu) yang mendefinisikan:
+          # register to enhance time accuracy" (Leilk Liu):
           #   SPI_ADJUST_CFG0_SCK_LOW_OFFSET  = 16
           #   SPI_ADJUST_CFG0_CS_HOLD_OFFSET  = 0
           #   SPI_ADJUST_CFG0_CS_SETUP_OFFSET = 16
-          # Sebelumnya kita asal isi 0 supaya compile lolos -- itu bikin field
-          # SCK_LOW nimpa bit yang sama persis dengan SCK_HIGH (offset 0),
-          # ngerusak timing clock SPI. Touchscreen (SPI-based: NVT-ts-spi /
-          # ili9882x-spi) jadi gagal komunikasi walau kernel tetap boot normal.
+          # Hunk yang MENGHAPUS #define lama ini dari upstream diff BERHASIL
+          # diterapkan (karena vendor tree sebelum upgrade juga punya nilai
+          # 16 yang sama persis), tapi hunk pengganti logic register yang
+          # baru (SPI_CFG2_SCK_HIGH/LOW_OFFSET) GAGAL nempel karena fungsi
+          # vendor sudah dimodifikasi (lihat step "Fix spi-mt65xx.c"
+          # sebelumnya). Body fungsi masih mereferensikan macro lama ini,
+          # jadi harus didefinisikan ulang di sini -- BUKAN buat "akal-akalan
+          # supaya compile lolos", tapi nilainya memang identik dengan
+          # baseline yang sudah terbukti jalan sebelum upgrade.
           if grep -q "^#define SPI_ADJUST_CFG0_SCK_LOW_OFFSET" "$FILE"; then
             echo "Guard sudah ada, skip insert."
           else
@@ -123,8 +287,6 @@ jobs:
           echo "--- Preview hasil insert ---"
           grep -n -A3 -B3 "SPI_ADJUST_CFG0_SCK_LOW_OFFSET" "$FILE"
 
-          # Gate: pastikan #define-nya beneran ada di file sebelum lanjut build,
-          # biar gagalnya cepat ketauan di sini, bukan nyangkut 10+ menit di step Build.
           if ! grep -q "^#define SPI_ADJUST_CFG0_SCK_LOW_OFFSET" "$FILE"; then
             echo "::error::#define SPI_ADJUST_CFG0_SCK_LOW_OFFSET tetap tidak ditemukan di $FILE setelah insert."
             exit 1
@@ -154,3 +316,4 @@ jobs:
         with:
           name: RooXie-v190
           path: out/arch/arm/boot/boot.img-kernel
+          
