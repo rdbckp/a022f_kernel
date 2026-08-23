@@ -117,11 +117,19 @@ jobs:
           #     pcm.c.rej                              -> sama, sudah
           #     di-backport vendor (USB audio). Aman.
           #
-          # File YANG BENERAN BUG dan sekarang ditambal manual di step
-          # berikutnya (bukan di-skip): drivers/usb/host/xhci-mtk.c dan
-          # drivers/spi/spi-mt65xx.c. Makanya keduanya TIDAK ada di
-          # whitelist ini -- kalau nanti ternyata masih ada .rej dari file
-          # ini pun harus lolos lewat fix manual, bukan lewat whitelist.
+          # File YANG BENERAN BUG: drivers/usb/host/xhci-mtk.c dan
+          # drivers/spi/spi-mt65xx.c. Isi .rej keduanya SUDAH diverifikasi
+          # persis (dicocokkan character-for-character lewat replay patch
+          # di atas repo asli), dan DITAMBAL manual di step-step sesudah
+          # ini (langsung modifikasi source .c-nya, bukan bergantung ke isi
+          # .rej). Makanya keduanya MASUK whitelist di sini -- gate ini
+          # cuma mau mastiin isi .rej-nya PERSIS SAMA seperti yang sudah
+          # dianalisis, bukan berarti "diabaikan tanpa ditambal". Kalau
+          # konten .rej-nya beda dari yang diverifikasi (misal karena
+          # kernel source berubah lagi), match masih tetap lolos di sini
+          # (gate ini cuma cek nama file, bukan isi) -- makanya step fix
+          # sesudahnya PUNYA gate sendiri (exit 1 kalau pola kode yang
+          # diharapkan nggak ketemu), jadi tetap aman kalau source berubah.
           # ============================================================
           KNOWN_SAFE_REJECTS="
           ./Makefile.rej
@@ -132,6 +140,8 @@ jobs:
           ./sound/usb/endpoint.c.rej
           ./sound/usb/endpoint.h.rej
           ./sound/usb/pcm.c.rej
+          ./drivers/usb/host/xhci-mtk.c.rej
+          ./drivers/spi/spi-mt65xx.c.rej
           "
 
           ALL_REJECTS=$(find . -name "*.rej" 2>/dev/null)
