@@ -1,4 +1,4 @@
-name: Build Up (v200)
+name: v200
 
 on:
   workflow_dispatch:
