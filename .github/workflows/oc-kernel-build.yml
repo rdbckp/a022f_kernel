@@ -62,7 +62,8 @@ jobs:
         run: |
           # GANTI baris ini sesuai skrip build asli lo ("z", arch arm)
           # contoh placeholder:
-          # ./z a02_defconfig
+          chmod +x z
+          ./z
           echo "TODO: panggil skrip build 'z' lo di sini"
 
       - name: Upload hasil build sebagai artifact
