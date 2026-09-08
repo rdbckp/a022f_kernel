@@ -1,0 +1,75 @@
+name: OC Kernel Build (Manual, Temporary Patch)
+
+on:
+  workflow_dispatch:
+    inputs:
+      target_freq_khz:
+        description: 'Target max clock (KHz)'
+        required: true
+        default: '1500000'
+      volt_fy:
+        description: 'VOLT0 segment FY (10uV unit, mis. 135000 = 1350mV)'
+        required: true
+        default: '135000'
+      volt_sb:
+        description: 'VOLT0 segment SB (10uV unit, mis. 131875 = 1318.75mV)'
+        required: true
+        default: '131875'
+      volt_fy2:
+        description: 'VOLT0 segment FY2 (10uV unit, mis. 140000 = 1400mV)'
+        required: true
+        default: '140000'
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout kernel source
+        uses: actions/checkout@v4
+        with:
+          ref: 186-master
+
+      - name: Backup file OPP table asli
+        run: |
+          OPP_FILE="drivers/misc/mediatek/base/power/cpufreq_v2/src/mach/mt6739/mtk_cpufreq_opp_table.h"
+          cp "$OPP_FILE" "$OPP_FILE.bak"
+
+      - name: Patch OC (sementara, cuma di runner ini)
+        run: |
+          OPP_FILE="drivers/misc/mediatek/base/power/cpufreq_v2/src/mach/mt6739/mtk_cpufreq_opp_table.h"
+
+          # FREQ0 tiap segment -> target_freq_khz
+          sed -i "s/^#define CPU_DVFS_FREQ0_LL_FY\\t\\t[0-9]*\\t\\t\\/\\* KHz \\*\\//#define CPU_DVFS_FREQ0_LL_FY\\t\\t${{ github.event.inputs.target_freq_khz }}\\t\\t\\/* KHz - OC *\\//" "$OPP_FILE"
+          sed -i "s/^#define CPU_DVFS_FREQ0_LL_SB\\t\\t[0-9]*\\t\\t\\/\\* KHz \\*\\//#define CPU_DVFS_FREQ0_LL_SB\\t\\t${{ github.event.inputs.target_freq_khz }}\\t\\t\\/* KHz - OC *\\//" "$OPP_FILE"
+          sed -i "s/^#define CPU_DVFS_FREQ0_LL_FY2\\t\\t[0-9]*\\t\\t\\/\\* KHz \\*\\//#define CPU_DVFS_FREQ0_LL_FY2\\t\\t${{ github.event.inputs.target_freq_khz }}\\t\\t\\/* KHz - OC *\\//" "$OPP_FILE"
+
+          # VOLT0 tiap segment
+          sed -i "s/^#define CPU_DVFS_VOLT0_VPROC1_FY\\t [0-9]*\\t\\t\\/\\* 10uV \\*\\//#define CPU_DVFS_VOLT0_VPROC1_FY\\t ${{ github.event.inputs.volt_fy }}\\t\\t\\/* 10uV - OC *\\//" "$OPP_FILE"
+          sed -i "s/^#define CPU_DVFS_VOLT0_VPROC1_SB\\t [0-9]*\\t\\t\\/\\* 10uV \\*\\//#define CPU_DVFS_VOLT0_VPROC1_SB\\t ${{ github.event.inputs.volt_sb }}\\t\\t\\/* 10uV - OC *\\//" "$OPP_FILE"
+          sed -i "s/^#define CPU_DVFS_VOLT0_VPROC1_FY2\\t [0-9]*\\t\\t\\/\\* 10uV \\*\\//#define CPU_DVFS_VOLT0_VPROC1_FY2\\t ${{ github.event.inputs.volt_fy2 }}\\t\\t\\/* 10uV - OC *\\//" "$OPP_FILE"
+
+      - name: Tampilkan diff hasil patch
+        run: |
+          OPP_FILE="drivers/misc/mediatek/base/power/cpufreq_v2/src/mach/mt6739/mtk_cpufreq_opp_table.h"
+          diff -u "$OPP_FILE.bak" "$OPP_FILE" || true
+
+      - name: Setup toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-arm-linux-gnueabi bc bison flex libssl-dev
+
+      - name: Build kernel (arch arm 32-bit)
+        run: |
+          # GANTI baris ini sesuai skrip build asli lo ("z", arch arm)
+          # contoh placeholder:
+          # ./z a02_defconfig
+          echo "TODO: panggil skrip build 'z' lo di sini"
+
+      - name: Upload hasil build sebagai artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: a02-kernel-OC-${{ github.event.inputs.target_freq_khz }}khz
+          path: |
+            out/arch/arm/boot/Image
+            out/arch/arm/boot/zImage
+          if-no-files-found: warn
