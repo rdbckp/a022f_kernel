@@ -377,131 +377,50 @@ jobs:
             exit 1
           fi
 
-      - name: Generate Changelog
+      - name: Fix sound/usb/card.h (missing stream_offset_adj field)
         run: |
-          # Auto-generate changelog dari commit log resmi v4.14.186->v4.14.200
-          # (fetch shallow-since supaya history-nya nyambung, bukan cuma
-          # snapshot 2 tag terpisah), difilter ke direktori yang relevan
-          # buat kernel ini, dibuang commit "Linux 4.14.x" version-bump.
-          git remote add changelog-src https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux-stable.git 2>/dev/null || \
-          git remote add changelog-src https://github.com/gregkh/linux.git 2>/dev/null || true
-
-          FETCH_OK=0
-          if git fetch changelog-src tag v4.14.186 tag v4.14.200 --no-tags --depth 1 2>/dev/null; then
-            V186_DATE=$(git log -1 --format=%cd --date=short v4.14.186 2>/dev/null)
-            if [ -n "$V186_DATE" ] && git fetch changelog-src linux-4.14.y --shallow-since="$V186_DATE" 2>/dev/null; then
-              FETCH_OK=1
-            fi
-          fi
-
-          {
-            echo "======================================================"
-            echo " RooXie Kernel -- Changelog v4.14.186 -> v4.14.200"
-            echo " Build date: $(date -u +'%Y-%m-%d %H:%M:%S UTC')"
-            echo " Device: Samsung SM-A022F (MT6739)"
-            echo "======================================================"
-            echo
-            echo "## Upstream fixes (Linux stable v4.14.186..v4.14.200)"
-            echo
-
-            if [ "$FETCH_OK" -eq 1 ]; then
-              git log v4.14.186..v4.14.200 --pretty=format:"- %s" -- arch/arm/ drivers/ include/ kernel/ mm/ net/ sound/ Makefile 2>/dev/null \
-                | grep -viE "^- Linux 4\.14\.(18[7-9]|19[0-9]|200)$" \
-                | sort -u
-            else
-              echo "(gagal fetch history upstream saat build ini -- lihat commit range resmi di https://git.kernel.org/.../linux-stable.git/log/?h=linux-4.14.y)"
-            fi
-
-            echo
-            echo "## Custom fixes (A02 vendor tree, ditambal manual di workflow ini)"
-            echo
-            echo "- spi: mediatek: perbaiki reg_val yang tidak terinisialisasi di mtk_spi_prepare_transfer()"
-            echo "  (penyebab hang-di-boot-logo waktu upgrade ke v190, ditambal juga di sini karena"
-            echo "  hunk register-timing upstream tidak applicable ke fungsi vendor yang sudah dimodifikasi)"
-            echo "- usb: xhci-mtk: hapus duplicate pm_runtime_put_noidle()+pm_runtime_disable() di xhci_mtk_remove()"
-            echo
-            echo "## Known gaps (aman di-skip, non-boot-blocking, bisa direvisit)"
-            echo
-            echo "- android: binder: self-transaction WARN_ON check belum di-backport"
-            echo "- mm: cow_user_page() race-condition hardening belum di-backport"
-            echo "- HID: beberapa defensive-programming fix (hid-core/hid-input/hid-multitouch) belum di-backport"
-            echo
-          } > CHANGELOG.txt
-
-          cat CHANGELOG.txt
-
-      - name: Build Kernel
-        run: |
-          chmod +x z
-          set -o pipefail
-          ./z
-          # Sanity check tambahan: z script sendiri punya bug lama (pipe ke
-          # tee tanpa pipefail) yang bisa nyembunyiin kegagalan make asli.
-          # set -o pipefail di atas menutup itu untuk shell run ini, TAPI
-          # z jalan sebagai sub-shell terpisah (./z, bukan source z), jadi
-          # pipefail di sini nggak otomatis nembus ke dalam skrip z. Makanya
-          # kita cek langsung keberadaan output-nya di sini juga, biar step
-          # ini FAILED dengan jelas kalau build sebenarnya nggak selesai --
-          # bukan nyasar error di step Package Output kayak yang kemarin
-          # kejadian di run v200 pertama.
-          if [ ! -f "out/arch/arm/boot/zImage-dtb" ] && [ ! -f "out/arch/arm/boot/zImage" ]; then
-            echo "::error::Build kernel tidak menghasilkan zImage-dtb atau zImage di out/arch/arm/boot/."
-            if [ -f "build.log" ]; then
-              echo "::group::Baris 'error:' asli dari build.log (build -j paralel bikin ini kecebur di tengah ribuan baris CC, jadi dicari eksplisit)"
-              grep -n "error:\|Error 1\|Error 2" build.log | head -50
-              echo "::endgroup::"
-              echo "::group::Tail build.log (100 baris terakhir, buat konteks tambahan)"
-              tail -100 build.log
-              echo "::endgroup::"
-            fi
+          FILE="sound/usb/card.h"
+          # BUG NYATA, pola sama persis kayak mm/memory.c: hunk yang
+          # nambahin field stream_offset_adj ke struct snd_usb_substream
+          # di card.h GAGAL diterapkan, tapi hunk yang MEMAKAI field itu
+          # di sound/usb/pcm.c BERHASIL. Compile error asli: "no member
+          # named 'stream_offset_adj' in 'struct snd_usb_substream'".
+          # Idempotent.
+          if grep -q "stream_offset_adj" "$FILE"; then
+            echo "Field sudah ada, skip."
+          elif grep -q "unsigned int pkt_offset_adj;" "$FILE"; then
+            python3 - "$FILE" <<'PYEOF'
+          path = "sound/usb/card.h"
+          c = open(path).read()
+          old = "\tunsigned int pkt_offset_adj;\t/* Bytes to drop from beginning of packets (for non-compliant devices) */\n"
+          new = old + "\tunsigned int stream_offset_adj;\t/* Bytes to drop from beginning of stream (for non-compliant devices) */\n"
+          assert c.count(old) == 1
+          open(path, "w").write(c.replace(old, new))
+          print("Field stream_offset_adj ditambahkan.")
+          PYEOF
+          else
+            echo "::error::Anchor pkt_offset_adj tidak ditemukan di $FILE. Cek manual."
             exit 1
           fi
 
-      - name: Package Output
-        run: |
-          cd out/arch/arm/boot
-          if [ -f "zImage-dtb" ]; then
-            cp zImage-dtb boot.img-kernel
-          else
-            echo "::warning::zImage-dtb tidak ditemukan, fallback ke zImage (DTB terpisah)."
-            cp zImage boot.img-kernel
-          fi
-          cp "$GITHUB_WORKSPACE/CHANGELOG.txt" .
-
-          # Kalau zip gagal (misal binary nggak ada di runner) jangan bikin
-          # seluruh job gagal -- fallback ke python zipfile module (selalu
-          # tersedia di runner ubuntu-latest, nggak bergantung ke binary
-          # eksternal). boot.img-kernel mentah tetap ke-upload di kedua
-          # kasus supaya hasil build nggak hilang gara-gara masalah packaging.
-          if command -v zip >/dev/null 2>&1; then
-            zip RooXie-v200.zip boot.img-kernel CHANGELOG.txt
-          else
-            echo "::warning::binary zip tidak ditemukan, fallback ke python zipfile."
-            python3 -c "
-          import zipfile
-          with zipfile.ZipFile('RooXie-v200.zip', 'w', zipfile.ZIP_DEFLATED) as z:
-              z.write('boot.img-kernel')
-              z.write('CHANGELOG.txt')
-          "
-          fi
-
-          if [ ! -f "RooXie-v200.zip" ]; then
-            echo "::error::RooXie-v200.zip gagal dibuat lewat kedua cara (zip dan python zipfile)."
+          if ! grep -q "stream_offset_adj" "$FILE"; then
+            echo "::error::Field stream_offset_adj masih tidak ada setelah fix."
             exit 1
           fi
 
-      - name: Upload Build Log
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: build-log
-          path: build.log
-          if-no-files-found: ignore
+      - name: Fix drivers/hid/hid-core.c (duplicate hid_compute_report_size)
+        run: |
+          FILE="drivers/hid/hid-core.c"
+          # Pola sama kayak include/linux/overflow.h: hunk yang "sukses"
+          # (bukan .rej) nempel di tempat yang salah karena offset besar,
+          # nambah salinan kedua fungsi hid_compute_report_size() yang
+          # persis sama isinya dengan yang sudah ada. Compile error asli:
+          # "redefinition of 'hid_compute_report_size'". Idempotent.
+          COUNT=$(grep -c "^static size_t hid_compute_report_size" "$FILE" || true)
 
-      - name: Upload Kernel
-        uses: actions/upload-artifact@v4
-        with:
-          name: RooXie-v200
-          path: |
-            out/arch/arm/boot/RooXie-v200.zip
-            out/arch/arm/boot/boot.img-kernel
+          if [ "$COUNT" -eq 1 ]; then
+            echo "Cuma ada 1 definisi, sudah bersih. Skip."
+          elif [ "$COUNT" -ge 2 ]; then
+            python3 - "$FILE" <<'PYEOF'
+          path = "drivers/hid/hid-core.c"
+          with 
