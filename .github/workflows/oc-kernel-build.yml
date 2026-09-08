@@ -60,17 +60,22 @@ jobs:
 
       - name: Build kernel (arch arm 32-bit)
         run: |
-          # GANTI baris ini sesuai skrip build asli lo ("z", arch arm)
-          # contoh placeholder:
           chmod +x z
           ./z
-          echo "TODO: panggil skrip build 'z' lo di sini"
+
+      - name: Package Output
+        run: |
+          cd out/arch/arm/boot
+          if [ -f "zImage-dtb" ]; then
+            cp zImage-dtb boot.img-kernel
+          else
+            echo "::error::zImage-dtb tidak ditemukan -- build kemungkinan gagal sebelum sampai sini."
+            exit 1
+          fi
 
       - name: Upload hasil build sebagai artifact
         uses: actions/upload-artifact@v4
         with:
           name: a02-kernel-OC-${{ github.event.inputs.target_freq_khz }}khz
-          path: |
-            out/arch/arm/boot/Image
-            out/arch/arm/boot/zImage
-          if-no-files-found: warn
+          path: out/arch/arm/boot/boot.img-kernel
+          if-no-files-found: error
