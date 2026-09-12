@@ -1,0 +1,441 @@
+name: Build Up + OC (v190, staged)
+
+on:
+  workflow_dispatch:
+    inputs:
+      oc_step:
+        description: 'Tahap OC (freq+volt sepasang, nurutin kurva Takumi123w/kernel-a01c -- sama-sama MT6739)'
+        type: choice
+        required: true
+        default: 'step2_1359mhz'
+        options:
+          - stock_no_oc
+          - step1_1307mhz
+          - step2_1359mhz
+          - step3_1411mhz
+          - step4_1476mhz
+          - step5_1580mhz
+          - step6_1684mhz
+          - step7_1801mhz_MAX_A01C
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Source Kernel
+        uses: actions/checkout@v4
+        with:
+          ref: ilitek-branch
+          fetch-depth: 1
+
+      - name: Install Toolchain & Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y bc build-essential flex bison libssl-dev libelf-dev gcc-arm-linux-gnueabi
+
+      - name: Apply Upstream Patch (v186 to v190)
+        run: |
+          CURRENT_SUBLEVEL=$(grep "^SUBLEVEL =" Makefile | awk '{print $3}')
+
+          if [ "$CURRENT_SUBLEVEL" -eq "190" ]; then
+            echo "Sudah di v190, skip patch."
+          else
+            # git.kernel.org kadang kasih 502/503 (server upstream lagi
+            # bermasalah, bukan salah kita). Retry beberapa kali dulu,
+            # kalau tetap gagal baru coba mirror GitHub sebagai cadangan.
+            FETCH_OK=0
+            for i in 1 2 3; do
+              echo "Percobaan fetch ke git.kernel.org (ke-$i)..."
+              git remote add stable https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux-stable.git 2>/dev/null || true
+              if git fetch stable tag v4.14.186 tag v4.14.190 --no-tags --depth 1; then
+                FETCH_OK=1
+                break
+              fi
+              echo "Gagal, tunggu sebentar sebelum retry..."
+              sleep 10
+            done
+
+            if [ "$FETCH_OK" -eq 0 ]; then
+              echo "::warning::git.kernel.org gagal terus, coba mirror GitHub (gregkh/linux)..."
+              git remote remove stable 2>/dev/null || true
+              git remote add stable https://github.com/gregkh/linux.git 2>/dev/null || true
+              if git fetch stable tag v4.14.186 tag v4.14.190 --no-tags --depth 1; then
+                FETCH_OK=1
+              fi
+            fi
+
+            if [ "$FETCH_OK" -eq 0 ]; then
+              # PENTING: jangan bikin build gagal total cuma karena upstream
+              # server (git.kernel.org & mirror-nya) lagi down. Skip patch
+              # aja, tetap di v186, dan lanjut build -- bukan exit 1.
+              echo "::warning::Semua sumber patch gagal diakses. Skip patch v186->v190, lanjut build di v186."
+            else
+              git diff v4.14.186 v4.14.190 -- arch/arm/ drivers/ include/ kernel/ mm/ net/ sound/ Makefile > p190_clean.patch
+
+              # PENTING: exit code patch != 0 itu WAJAR (banyak file udah
+              # di-backport duluan sama vendor tree Samsung/MTK, sebagian malah
+              # lebih baru dari v190). set +e di sini cuma supaya step ini
+              # nggak mati di tengah jalan -- keputusan pass/fail SEBENARNYA
+              # ada di step "Verify Patch Result" berikutnya, yang mengecek
+              # SETIAP .rej satu per satu, bukan cuma nomor SUBLEVEL.
+              set +e
+              patch -p1 --forward --batch < p190_clean.patch
+              PATCH_EXIT=$?
+              set -e
+
+              echo "Exit code patch: $PATCH_EXIT (nonzero itu wajar kalau ada hunk yang di-skip karena sudah diterapkan/di-backport sebelumnya)"
+            fi
+          fi
+
+      - name: Verify Patch Result
+        run: |
+          NEW_SUBLEVEL=$(grep "^SUBLEVEL =" Makefile | awk '{print $3}')
+          echo "SUBLEVEL sekarang: $NEW_SUBLEVEL"
+
+          if [ "$NEW_SUBLEVEL" -eq "190" ]; then
+            echo "Patch v190 berhasil diterapkan."
+          elif [ "$NEW_SUBLEVEL" -eq "186" ]; then
+            echo "Tetap di v186 (patch di-skip, kemungkinan karena upstream server down). Ini aman, lanjut build."
+          else
+            echo "::error::SUBLEVEL ($NEW_SUBLEVEL) di luar dugaan (bukan 186 atau 190), ada yang salah beneran."
+            exit 1
+          fi
+
+          # ============================================================
+          # GATE UTAMA: setiap .rej WAJIB dikenali sebelum build lanjut.
+          # Kejadian kemarin (v190 upgrade hang di boot logo) itu penyebabnya
+          # persis di sini: .rej dihapus diam-diam tanpa dicek, jadi kernel
+          # yang dibuild itu campuran v186/v190 yang nggak konsisten.
+          #
+          # Daftar di bawah ini sudah diverifikasi manual satu-satu dengan
+          # cara clone repo ini + replay patch yang sama, lihat isi file
+          # aslinya kena apa:
+          #
+          #   - Makefile.rej                         -> FALSE POSITIVE.
+          #     Vendor tree sudah punya fix yang sama (CLANG_FLAGS --prefix),
+          #     cuma konteks diff-nya beda dikit. Aman, nggak perlu apa-apa.
+          #
+          #   - include/linux/mod_devicetable.h.rej  -> FALSE POSITIVE.
+          #     INPUT_DEVICE_ID_SW_MAX di vendor tree sudah 0x3f, sementara
+          #     v190 vanilla cuma minta 0x10 -- vendor tree JUSTRU LEBIH BARU
+          #     dari v190 di titik ini. JANGAN ditimpa nilai v190, itu malah
+          #     mundur/regresi.
+          #
+          #   - include/uapi/linux/input-event-codes.h.rej -> FALSE POSITIVE.
+          #     Vendor tree sudah punya lebih banyak definisi custom di area
+          #     ini, nomor baris & konteksnya nggak sebanding sama vanilla.
+          #     Jangan ditempel buta.
+          #
+          #   - drivers/block/loop.c.rej             -> "Reversed (or
+          #     previously applied)" = sudah di-backport vendor. Aman.
+          #
+          #   - sound/usb/card.h.rej, endpoint.c.rej, endpoint.h.rej,
+          #     pcm.c.rej                              -> sama, sudah
+          #     di-backport vendor (USB audio). Aman.
+          #
+          # File YANG BENERAN BUG: drivers/usb/host/xhci-mtk.c dan
+          # drivers/spi/spi-mt65xx.c. Isi .rej keduanya SUDAH diverifikasi
+          # persis (dicocokkan character-for-character lewat replay patch
+          # di atas repo asli), dan DITAMBAL manual di step-step sesudah
+          # ini (langsung modifikasi source .c-nya, bukan bergantung ke isi
+          # .rej). Makanya keduanya MASUK whitelist di sini -- gate ini
+          # cuma mau mastiin isi .rej-nya PERSIS SAMA seperti yang sudah
+          # dianalisis, bukan berarti "diabaikan tanpa ditambal". Kalau
+          # konten .rej-nya beda dari yang diverifikasi (misal karena
+          # kernel source berubah lagi), match masih tetap lolos di sini
+          # (gate ini cuma cek nama file, bukan isi) -- makanya step fix
+          # sesudahnya PUNYA gate sendiri (exit 1 kalau pola kode yang
+          # diharapkan nggak ketemu), jadi tetap aman kalau source berubah.
+          # ============================================================
+          KNOWN_SAFE_REJECTS="
+          ./Makefile.rej
+          ./include/linux/mod_devicetable.h.rej
+          ./include/uapi/linux/input-event-codes.h.rej
+          ./drivers/block/loop.c.rej
+          ./sound/usb/card.h.rej
+          ./sound/usb/endpoint.c.rej
+          ./sound/usb/endpoint.h.rej
+          ./sound/usb/pcm.c.rej
+          ./drivers/usb/host/xhci-mtk.c.rej
+          ./drivers/spi/spi-mt65xx.c.rej
+          "
+
+          ALL_REJECTS=$(find . -name "*.rej" 2>/dev/null)
+          UNEXPECTED_REJECTS=""
+
+          for f in $ALL_REJECTS; do
+            if ! echo "$KNOWN_SAFE_REJECTS" | grep -qxF "$f"; then
+              UNEXPECTED_REJECTS="$UNEXPECTED_REJECTS $f"
+            fi
+          done
+
+          if [ -n "$UNEXPECTED_REJECTS" ]; then
+            echo "::error::Ada .rej BARU yang belum pernah diverifikasi manual. Build DIHENTIKAN supaya nggak ngulang kejadian v190 hang-di-logo:"
+            for f in $UNEXPECTED_REJECTS; do
+              echo "  - $f"
+              cat "$f"
+            done
+            echo "::error::Cek manual isi file di atas (bandingkan sama upstream v4.14.186 -> v4.14.190), pastikan itu false positive (vendor sudah lebih baru) atau tambal manual sebelum lanjut, lalu update whitelist KNOWN_SAFE_REJECTS di step ini."
+            exit 1
+          fi
+
+          echo "Semua .rej yang ada sudah dikenali dan diverifikasi aman."
+          find . -name "*.rej" -delete 2>/dev/null || true
+
+      - name: Fix drivers/spi/spi-mt65xx.c (uninitialized reg_val)
+        run: |
+          FILE="drivers/spi/spi-mt65xx.c"
+
+          # BUG NYATA, dikonfirmasi dengan cara replay patch v186->v190 di
+          # atas repo asli: hunk yang MENGHAPUS inisialisasi
+          # "reg_val = 0" -> "reg_val" itu BERHASIL diterapkan, tapi hunk
+          # yang SEHARUSNYA mengganti logic reg_val (supaya first-use-nya
+          # jadi assignment "=", bukan OR "|=") GAGAL diterapkan, karena
+          # fungsi mtk_spi_prepare_transfer() di vendor tree ini sudah
+          # dimodifikasi (ada parameter spi_device* & cs_setuptime/holdtime/
+          # idletime per-chip yang nggak ada di vanilla upstream).
+          #
+          # Hasilnya: reg_val dipakai lewat "|=" pada penggunaan PERTAMA,
+          # padahal nggak pernah diinisialisasi -- classic uninitialized
+          # stack variable, lalu ditulis langsung ke register hardware SPI
+          # (SPI_CFG2_REG / SPI_CFG0_REG) lewat writel(). Ini undefined
+          # behavior nyata di jalur init SPI controller, bukan cuma warning
+          # kosmetik.
+          #
+          # Fix: kembalikan inisialisasi eksplisit "reg_val = 0" di
+          # deklarasi, seperti sebelum di-upgrade. Idempotent -- kalau
+          # inisialisasi sudah ada (build ulang / SUBLEVEL masih 186), skip.
+          if grep -q "u32 spi_clk_hz, div, sck_time, cs_time, reg_val = 0;" "$FILE"; then
+            echo "reg_val sudah terinisialisasi, skip."
+          elif grep -q "u32 spi_clk_hz, div, sck_time, cs_time, reg_val;" "$FILE"; then
+            sed -i 's/u32 spi_clk_hz, div, sck_time, cs_time, reg_val;/u32 spi_clk_hz, div, sck_time, cs_time, reg_val = 0;/' "$FILE"
+            echo "Inisialisasi reg_val = 0 dikembalikan."
+          else
+            echo "::error::Deklarasi reg_val di $FILE nggak ketemu pola yang diharapkan -- kemungkinan struktur fungsi sudah berubah lagi. Cek manual, jangan lanjut build buta."
+            exit 1
+          fi
+
+          echo "--- Preview hasil fix ---"
+          grep -n -A2 "reg_val = 0;" "$FILE" | head -6
+
+          if ! grep -q "u32 spi_clk_hz, div, sck_time, cs_time, reg_val = 0;" "$FILE"; then
+            echo "::error::reg_val masih belum terinisialisasi setelah fix di $FILE."
+            exit 1
+          fi
+
+      - name: Fix drivers/usb/host/xhci-mtk.c (duplicate pm_runtime call)
+        run: |
+          FILE="drivers/usb/host/xhci-mtk.c"
+
+          # BUG NYATA, dikonfirmasi sama cara: hunk yang MENAMBAH blok baru
+          # "pm_runtime_put_noidle(&dev->dev); pm_runtime_disable(&dev->dev);"
+          # di awal xhci_mtk_remove() BERHASIL diterapkan, tapi hunk yang
+          # SEHARUSNYA MENGHAPUS blok lama yang setara di akhir fungsi GAGAL
+          # (karena vendor tree ini ternyata sudah pakai put_noidle juga di
+          # situ, bukan put_sync seperti asumsi patch upstream -- jadi
+          # konteksnya nggak match). Hasilnya: xhci_mtk_remove() sekarang
+          # manggil pm_runtime_put_noidle()+pm_runtime_disable() DUA KALI.
+          #
+          # Ini bukan penyebab hang-di-logo (fungsi ini cuma jalan pas
+          # device di-remove/rmmod/suspend, bukan cold boot), tapi tetap
+          # bug nyata: pm_runtime_disable() dipanggil dobel bisa bikin
+          # refcount pm_runtime underflow/WARN_ON pas suspend atau rmmod.
+          # Ditambal sekalian di sini biar tree konsisten dan nggak nyisain
+          # utang teknis buat rebuild berikutnya.
+          #
+          # Fix: hapus blok kedua (yang di akhir fungsi, sebelum
+          # usb_remove_hcd(shared_hcd)), pertahankan blok pertama (yang
+          # baru ditambahkan lewat hunk yang berhasil di awal fungsi).
+          COUNT=$(grep -c "pm_runtime_put_noidle(&dev->dev);" "$FILE" || true)
+
+          if [ "$COUNT" -eq 1 ]; then
+            echo "Cuma ada 1 pemanggilan, sudah bersih. Skip."
+          elif [ "$COUNT" -ge 2 ]; then
+            python3 - "$FILE" <<'PYEOF'
+          import sys
+          path = sys.argv[1]
+          with open(path) as f:
+              content = f.read()
+
+          block = "\tpm_runtime_put_noidle(&dev->dev);\n\tpm_runtime_disable(&dev->dev);\n\n"
+          first = content.find(block)
+          second = content.find(block, first + len(block))
+
+          if first == -1 or second == -1:
+              print("::error::Pola blok duplikat tidak ditemukan persis seperti yang diharapkan.")
+              sys.exit(1)
+
+          content = content[:second] + content[second + len(block):]
+          with open(path, "w") as f:
+              f.write(content)
+          print("Blok duplikat kedua dihapus.")
+          PYEOF
+          else
+            echo "::error::pm_runtime_put_noidle tidak ditemukan sama sekali di $FILE -- struktur fungsi kemungkinan berubah. Cek manual."
+            exit 1
+          fi
+
+          echo "--- Preview hasil fix ---"
+          grep -n -B1 -A1 "pm_runtime_put_noidle(&dev->dev);" "$FILE"
+
+          FINAL_COUNT=$(grep -c "pm_runtime_put_noidle(&dev->dev);" "$FILE" || true)
+          if [ "$FINAL_COUNT" -ne 1 ]; then
+            echo "::error::Masih ada $FINAL_COUNT pemanggilan pm_runtime_put_noidle setelah fix (harusnya 1)."
+            exit 1
+          fi
+
+      - name: Fix MediaTek SPI Timing Offset
+        run: |
+          FILE="drivers/spi/spi-mt65xx.c"
+
+          # NILAI YANG BENAR: 16, bukan 0.
+          # Dikonfirmasi dari patch resmi MediaTek "spi: mediatek: adjust
+          # register to enhance time accuracy" (Leilk Liu):
+          #   SPI_ADJUST_CFG0_SCK_LOW_OFFSET  = 16
+          #   SPI_ADJUST_CFG0_CS_HOLD_OFFSET  = 0
+          #   SPI_ADJUST_CFG0_CS_SETUP_OFFSET = 16
+          # Hunk yang MENGHAPUS #define lama ini dari upstream diff BERHASIL
+          # diterapkan (karena vendor tree sebelum upgrade juga punya nilai
+          # 16 yang sama persis), tapi hunk pengganti logic register yang
+          # baru (SPI_CFG2_SCK_HIGH/LOW_OFFSET) GAGAL nempel karena fungsi
+          # vendor sudah dimodifikasi (lihat step "Fix spi-mt65xx.c"
+          # sebelumnya). Body fungsi masih mereferensikan macro lama ini,
+          # jadi harus didefinisikan ulang di sini -- BUKAN buat "akal-akalan
+          # supaya compile lolos", tapi nilainya memang identik dengan
+          # baseline yang sudah terbukti jalan sebelum upgrade.
+          if grep -q "^#define SPI_ADJUST_CFG0_SCK_LOW_OFFSET" "$FILE"; then
+            echo "Guard sudah ada, skip insert."
+          else
+            LAST_INCLUDE_LINE=$(grep -n '^#include' "$FILE" | tail -1 | cut -d: -f1)
+            awk -v n="$LAST_INCLUDE_LINE" '{print} NR==n {print "#ifndef SPI_ADJUST_CFG0_SCK_LOW_OFFSET"; print "#define SPI_ADJUST_CFG0_SCK_LOW_OFFSET 16"; print "#endif"}' "$FILE" > "$FILE.tmp" && mv "$FILE.tmp" "$FILE"
+          fi
+
+          echo "--- Preview hasil insert ---"
+          grep -n -A3 -B3 "SPI_ADJUST_CFG0_SCK_LOW_OFFSET" "$FILE"
+
+          if ! grep -q "^#define SPI_ADJUST_CFG0_SCK_LOW_OFFSET" "$FILE"; then
+            echo "::error::#define SPI_ADJUST_CFG0_SCK_LOW_OFFSET tetap tidak ditemukan di $FILE setelah insert."
+            exit 1
+          fi
+
+      - name: Tentukan freq & volt OC dari preset
+        id: oc
+        run: |
+          # ============================================================
+          # Pasangan freq/volt di bawah ini DIAMBIL LANGSUNG dari tabel
+          # OPP kernel Takumi123w/kernel-a01c (Samsung A01 Core / SM-A013),
+          # yang sudah dikonfirmasi pakai chipset MT6739 SAMA PERSIS dengan
+          # A02 (SM-A022F) -- termasuk konstanta MAX_VSRAM_VOLT=131250
+          # (1.3125V) yang identik (sudah dicek langsung di kedua repo).
+          # Kernel itu TERBUKTI jalan stabil di hardware sampai 1801MHz
+          # dengan voltase maksimum 130625, TANPA PERNAH melewati plafon
+          # VSRAM 131250 di baris manapun.
+          #
+          # Ini alasan kenapa percobaan OC pertama (volt_fy2=140000/1.4V)
+          # bikin crash "undefined instruction" di set_cur_volt_wrapper --
+          # itu jauh di ATAS plafon 131250, bikin VSRAM ke-clamp jadi
+          # LEBIH RENDAH dari VPROC (state elektris tidak valid). Nilai di
+          # bawah ini semua sudah divalidasi tidak pernah menyentuh plafon
+          # itu, kecuali step7 yang sengaja pas di titik amannya (130625,
+          # masih 625 unit / 6.25mV di bawah 131250).
+          #
+          # Naik satu step per percobaan, stress-test dulu sebelum naik
+          # lagi -- jangan loncat langsung ke step7. Pilih "stock_no_oc"
+          # buat build v190 polos tanpa OC sama sekali.
+          # ============================================================
+          case "${{ github.event.inputs.oc_step }}" in
+            stock_no_oc)
+              SKIP_OC=1 ;;
+            step1_1307mhz)
+              SKIP_OC=0; FREQ=1307000; VOLT=117500 ;;
+            step2_1359mhz)
+              SKIP_OC=0; FREQ=1359000; VOLT=120000 ;;
+            step3_1411mhz)
+              SKIP_OC=0; FREQ=1411000; VOLT=122500 ;;
+            step4_1476mhz)
+              SKIP_OC=0; FREQ=1476000; VOLT=125000 ;;
+            step5_1580mhz)
+              SKIP_OC=0; FREQ=1580000; VOLT=126875 ;;
+            step6_1684mhz)
+              SKIP_OC=0; FREQ=1684000; VOLT=128750 ;;
+            step7_1801mhz_MAX_A01C)
+              SKIP_OC=0; FREQ=1801000; VOLT=130625 ;;
+            *)
+              echo "::error::oc_step tidak dikenali: ${{ github.event.inputs.oc_step }}"
+              exit 1
+              ;;
+          esac
+
+          if [ "$SKIP_OC" -eq 1 ]; then
+            echo "stock_no_oc dipilih, build v190 polos tanpa patch OPP table."
+            echo "skip_oc=1" >> "$GITHUB_OUTPUT"
+          else
+            # Safety net tambahan: walau semua preset di atas sudah aman,
+            # tetap hard-block kalau suatu saat ada yang nambah preset baru
+            # dengan volt di atas plafon aman A01C (130625). Ini jaring
+            # pengaman kedua, bukan pengganti verifikasi manual preset baru.
+            MAX_SAFE_VOLT=130625
+            if [ "$VOLT" -gt "$MAX_SAFE_VOLT" ]; then
+              echo "::error::Voltase $VOLT melebihi batas aman terverifikasi ($MAX_SAFE_VOLT). Build dihentikan."
+              exit 1
+            fi
+
+            echo "Step dipilih: ${{ github.event.inputs.oc_step }} -> FREQ=${FREQ}KHz, VOLT=${VOLT} (10uV)"
+            echo "skip_oc=0" >> "$GITHUB_OUTPUT"
+            echo "freq=$FREQ" >> "$GITHUB_OUTPUT"
+            echo "volt=$VOLT" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Backup file OPP table asli
+        if: steps.oc.outputs.skip_oc == '0'
+        run: |
+          OPP_FILE="drivers/misc/mediatek/base/power/cpufreq_v2/src/mach/mt6739/mtk_cpufreq_opp_table.h"
+          cp "$OPP_FILE" "$OPP_FILE.bak"
+
+      - name: Patch OC (sementara, cuma di runner ini)
+        if: steps.oc.outputs.skip_oc == '0'
+        run: |
+          OPP_FILE="drivers/misc/mediatek/base/power/cpufreq_v2/src/mach/mt6739/mtk_cpufreq_opp_table.h"
+          FREQ="${{ steps.oc.outputs.freq }}"
+          VOLT="${{ steps.oc.outputs.volt }}"
+
+          # FREQ0 tiap segment -> target freq dari preset
+          sed -i "s/^#define CPU_DVFS_FREQ0_LL_FY\\t\\t[0-9]*\\t\\t\\/\\* KHz \\*\\//#define CPU_DVFS_FREQ0_LL_FY\\t\\t${FREQ}\\t\\t\\/* KHz - OC *\\//" "$OPP_FILE"
+          sed -i "s/^#define CPU_DVFS_FREQ0_LL_SB\\t\\t[0-9]*\\t\\t\\/\\* KHz \\*\\//#define CPU_DVFS_FREQ0_LL_SB\\t\\t${FREQ}\\t\\t\\/* KHz - OC *\\//" "$OPP_FILE"
+          sed -i "s/^#define CPU_DVFS_FREQ0_LL_FY2\\t\\t[0-9]*\\t\\t\\/\\* KHz \\*\\//#define CPU_DVFS_FREQ0_LL_FY2\\t\\t${FREQ}\\t\\t\\/* KHz - OC *\\//" "$OPP_FILE"
+
+          # VOLT0 tiap segment -> volt dari preset (sepasang sama FREQ di atas)
+          sed -i "s/^#define CPU_DVFS_VOLT0_VPROC1_FY\\t [0-9]*\\t\\t\\/\\* 10uV \\*\\//#define CPU_DVFS_VOLT0_VPROC1_FY\\t ${VOLT}\\t\\t\\/* 10uV - OC *\\//" "$OPP_FILE"
+          sed -i "s/^#define CPU_DVFS_VOLT0_VPROC1_SB\\t [0-9]*\\t\\t\\/\\* 10uV \\*\\//#define CPU_DVFS_VOLT0_VPROC1_SB\\t ${VOLT}\\t\\t\\/* 10uV - OC *\\//" "$OPP_FILE"
+          sed -i "s/^#define CPU_DVFS_VOLT0_VPROC1_FY2\\t [0-9]*\\t\\t\\/\\* 10uV \\*\\//#define CPU_DVFS_VOLT0_VPROC1_FY2\\t ${VOLT}\\t\\t\\/* 10uV - OC *\\//" "$OPP_FILE"
+
+      - name: Tampilkan diff hasil patch OC
+        if: steps.oc.outputs.skip_oc == '0'
+        run: |
+          OPP_FILE="drivers/misc/mediatek/base/power/cpufreq_v2/src/mach/mt6739/mtk_cpufreq_opp_table.h"
+          diff -u "$OPP_FILE.bak" "$OPP_FILE" || true
+
+      - name: Build Kernel
+        run: |
+          chmod +x z
+          ./z
+
+      - name: Package Output
+        run: |
+          cd out/arch/arm/boot
+          # Samain dengan cara main.yml packaging: pakai zImage-dtb (kernel +
+          # device tree nyatu) sebagai boot.img-kernel, bukan zImage polos.
+          # Kalau zImage-dtb nggak ke-generate, fallback ke zImage biasa biar
+          # step ini tetap nggak gagal total, tapi kasih warning biar ketauan.
+          if [ -f "zImage-dtb" ]; then
+            cp zImage-dtb boot.img-kernel
+          else
+            echo "::warning::zImage-dtb tidak ditemukan, fallback ke zImage (DTB terpisah)."
+            cp zImage boot.img-kernel
+          fi
+
+      - name: Upload Kernel
+        uses: actions/upload-artifact@v4
+        with:
+          name: RooXie-v190-${{ github.event.inputs.oc_step }}
+          path: out/arch/arm/boot/boot.img-kernel
