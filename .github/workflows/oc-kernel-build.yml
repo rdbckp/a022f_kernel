@@ -1,24 +1,21 @@
-name: OC Kernel Build (Manual, Temporary Patch)
+name: OC Kernel Build (Staged, based on A01C MT6739 curve)
 
 on:
   workflow_dispatch:
     inputs:
-      target_freq_khz:
-        description: 'Target max clock (KHz)'
+      oc_step:
+        description: 'Tahap OC (freq+volt sepasang, nurutin kurva Takumi123w/kernel-a01c -- sama-sama MT6739)'
+        type: choice
         required: true
-        default: '1500000'
-      volt_fy:
-        description: 'VOLT0 segment FY (10uV unit, mis. 135000 = 1350mV)'
-        required: true
-        default: '135000'
-      volt_sb:
-        description: 'VOLT0 segment SB (10uV unit, mis. 131875 = 1318.75mV)'
-        required: true
-        default: '131875'
-      volt_fy2:
-        description: 'VOLT0 segment FY2 (10uV unit, mis. 140000 = 1400mV)'
-        required: true
-        default: '140000'
+        default: 'step2_1359mhz'
+        options:
+          - step1_1307mhz
+          - step2_1359mhz
+          - step3_1411mhz
+          - step4_1476mhz
+          - step5_1580mhz
+          - step6_1684mhz
+          - step7_1801mhz_MAX_A01C
 
 jobs:
   build:
@@ -29,6 +26,64 @@ jobs:
         with:
           ref: 186-master
 
+      - name: Tentukan freq & volt dari preset
+        id: oc
+        run: |
+          # ============================================================
+          # Pasangan freq/volt di bawah ini DIAMBIL LANGSUNG dari tabel
+          # OPP kernel Takumi123w/kernel-a01c (Samsung A01 Core / SM-A013),
+          # yang sudah dikonfirmasi pakai chipset MT6739 SAMA PERSIS dengan
+          # A02 (SM-A022F) -- termasuk konstanta MAX_VSRAM_VOLT=131250
+          # (1.3125V) yang identik. Kernel itu TERBUKTI jalan stabil di
+          # hardware sampai 1801MHz dengan voltase maksimum 130625, TANPA
+          # PERNAH melewati plafon VSRAM 131250 di baris manapun.
+          #
+          # Ini alasan kenapa percobaan sebelumnya (volt_fy2=140000/1.4V)
+          # bikin crash "undefined instruction" di set_cur_volt_wrapper --
+          # itu jauh di ATAS plafon 131250, bikin VSRAM ke-clamp jadi
+          # LEBIH RENDAH dari VPROC (state elektris tidak valid). Nilai di
+          # bawah ini semua sudah divalidasi tidak pernah menyentuh plafon
+          # itu, kecuali step7 yang sengaja pas di titik amannya (130625,
+          # masih 625 unit / 6.25mV di bawah 131250).
+          #
+          # Naik satu step per percobaan, stress-test dulu sebelum naik
+          # lagi -- jangan loncat langsung ke step7.
+          # ============================================================
+          case "${{ github.event.inputs.oc_step }}" in
+            step1_1307mhz)
+              FREQ=1307000; VOLT=117500 ;;
+            step2_1359mhz)
+              FREQ=1359000; VOLT=120000 ;;
+            step3_1411mhz)
+              FREQ=1411000; VOLT=122500 ;;
+            step4_1476mhz)
+              FREQ=1476000; VOLT=125000 ;;
+            step5_1580mhz)
+              FREQ=1580000; VOLT=126875 ;;
+            step6_1684mhz)
+              FREQ=1684000; VOLT=128750 ;;
+            step7_1801mhz_MAX_A01C)
+              FREQ=1801000; VOLT=130625 ;;
+            *)
+              echo "::error::oc_step tidak dikenali: ${{ github.event.inputs.oc_step }}"
+              exit 1
+              ;;
+          esac
+
+          # Safety net tambahan: walau semua preset di atas sudah aman,
+          # tetap hard-block kalau suatu saat ada yang nambah preset baru
+          # dengan volt di atas plafon aman A01C (130625). Ini jaring
+          # pengaman kedua, bukan pengganti verifikasi manual preset baru.
+          MAX_SAFE_VOLT=130625
+          if [ "$VOLT" -gt "$MAX_SAFE_VOLT" ]; then
+            echo "::error::Voltase $VOLT melebihi batas aman terverifikasi ($MAX_SAFE_VOLT). Build dihentikan."
+            exit 1
+          fi
+
+          echo "Step dipilih: ${{ github.event.inputs.oc_step }} -> FREQ=${FREQ}KHz, VOLT=${VOLT} (10uV)"
+          echo "freq=$FREQ" >> "$GITHUB_OUTPUT"
+          echo "volt=$VOLT" >> "$GITHUB_OUTPUT"
+
       - name: Backup file OPP table asli
         run: |
           OPP_FILE="drivers/misc/mediatek/base/power/cpufreq_v2/src/mach/mt6739/mtk_cpufreq_opp_table.h"
@@ -37,16 +92,18 @@ jobs:
       - name: Patch OC (sementara, cuma di runner ini)
         run: |
           OPP_FILE="drivers/misc/mediatek/base/power/cpufreq_v2/src/mach/mt6739/mtk_cpufreq_opp_table.h"
+          FREQ="${{ steps.oc.outputs.freq }}"
+          VOLT="${{ steps.oc.outputs.volt }}"
 
-          # FREQ0 tiap segment -> target_freq_khz
-          sed -i "s/^#define CPU_DVFS_FREQ0_LL_FY\\t\\t[0-9]*\\t\\t\\/\\* KHz \\*\\//#define CPU_DVFS_FREQ0_LL_FY\\t\\t${{ github.event.inputs.target_freq_khz }}\\t\\t\\/* KHz - OC *\\//" "$OPP_FILE"
-          sed -i "s/^#define CPU_DVFS_FREQ0_LL_SB\\t\\t[0-9]*\\t\\t\\/\\* KHz \\*\\//#define CPU_DVFS_FREQ0_LL_SB\\t\\t${{ github.event.inputs.target_freq_khz }}\\t\\t\\/* KHz - OC *\\//" "$OPP_FILE"
-          sed -i "s/^#define CPU_DVFS_FREQ0_LL_FY2\\t\\t[0-9]*\\t\\t\\/\\* KHz \\*\\//#define CPU_DVFS_FREQ0_LL_FY2\\t\\t${{ github.event.inputs.target_freq_khz }}\\t\\t\\/* KHz - OC *\\//" "$OPP_FILE"
+          # FREQ0 tiap segment -> target freq dari preset
+          sed -i "s/^#define CPU_DVFS_FREQ0_LL_FY\\t\\t[0-9]*\\t\\t\\/\\* KHz \\*\\//#define CPU_DVFS_FREQ0_LL_FY\\t\\t${FREQ}\\t\\t\\/* KHz - OC *\\//" "$OPP_FILE"
+          sed -i "s/^#define CPU_DVFS_FREQ0_LL_SB\\t\\t[0-9]*\\t\\t\\/\\* KHz \\*\\//#define CPU_DVFS_FREQ0_LL_SB\\t\\t${FREQ}\\t\\t\\/* KHz - OC *\\//" "$OPP_FILE"
+          sed -i "s/^#define CPU_DVFS_FREQ0_LL_FY2\\t\\t[0-9]*\\t\\t\\/\\* KHz \\*\\//#define CPU_DVFS_FREQ0_LL_FY2\\t\\t${FREQ}\\t\\t\\/* KHz - OC *\\//" "$OPP_FILE"
 
-          # VOLT0 tiap segment
-          sed -i "s/^#define CPU_DVFS_VOLT0_VPROC1_FY\\t [0-9]*\\t\\t\\/\\* 10uV \\*\\//#define CPU_DVFS_VOLT0_VPROC1_FY\\t ${{ github.event.inputs.volt_fy }}\\t\\t\\/* 10uV - OC *\\//" "$OPP_FILE"
-          sed -i "s/^#define CPU_DVFS_VOLT0_VPROC1_SB\\t [0-9]*\\t\\t\\/\\* 10uV \\*\\//#define CPU_DVFS_VOLT0_VPROC1_SB\\t ${{ github.event.inputs.volt_sb }}\\t\\t\\/* 10uV - OC *\\//" "$OPP_FILE"
-          sed -i "s/^#define CPU_DVFS_VOLT0_VPROC1_FY2\\t [0-9]*\\t\\t\\/\\* 10uV \\*\\//#define CPU_DVFS_VOLT0_VPROC1_FY2\\t ${{ github.event.inputs.volt_fy2 }}\\t\\t\\/* 10uV - OC *\\//" "$OPP_FILE"
+          # VOLT0 tiap segment -> volt dari preset (sepasang sama FREQ di atas)
+          sed -i "s/^#define CPU_DVFS_VOLT0_VPROC1_FY\\t [0-9]*\\t\\t\\/\\* 10uV \\*\\//#define CPU_DVFS_VOLT0_VPROC1_FY\\t ${VOLT}\\t\\t\\/* 10uV - OC *\\//" "$OPP_FILE"
+          sed -i "s/^#define CPU_DVFS_VOLT0_VPROC1_SB\\t [0-9]*\\t\\t\\/\\* 10uV \\*\\//#define CPU_DVFS_VOLT0_VPROC1_SB\\t ${VOLT}\\t\\t\\/* 10uV - OC *\\//" "$OPP_FILE"
+          sed -i "s/^#define CPU_DVFS_VOLT0_VPROC1_FY2\\t [0-9]*\\t\\t\\/\\* 10uV \\*\\//#define CPU_DVFS_VOLT0_VPROC1_FY2\\t ${VOLT}\\t\\t\\/* 10uV - OC *\\//" "$OPP_FILE"
 
       - name: Tampilkan diff hasil patch
         run: |
@@ -76,6 +133,6 @@ jobs:
       - name: Upload hasil build sebagai artifact
         uses: actions/upload-artifact@v4
         with:
-          name: a02-kernel-OC-${{ github.event.inputs.target_freq_khz }}khz
+          name: a02-kernel-OC-${{ github.event.inputs.oc_step }}
           path: out/arch/arm/boot/boot.img-kernel
           if-no-files-found: error
