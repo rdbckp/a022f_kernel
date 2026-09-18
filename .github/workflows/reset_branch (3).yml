@@ -1,0 +1,106 @@
+name: Reset Branch to Commit
+
+permissions:
+  contents: write
+
+on:
+  workflow_dispatch:
+    inputs:
+      target_branch:
+        description: 'Branch yang mau di-reset (contoh: upstream)'
+        type: string
+        required: true
+      commit_sha:
+        description: 'Commit SHA tujuan reset (kosongin kalau mau pake find_sublevel di bawah)'
+        type: string
+        required: false
+        default: ''
+      find_sublevel:
+        description: 'ATAU: cari otomatis commit TERBARU yang SUBLEVEL Makefile-nya = angka ini. HATI-HATI: ini cuma cek Makefile, commit lain yang gak nyentuh Makefile ikut kebuang meski gak terkait. Lebih aman pakai before_first_autobuild di bawah.'
+        type: string
+        required: false
+        default: ''
+      before_first_autobuild:
+        description: 'ATAU (paling aman): isi "yes" buat reset ke tepat SEBELUM commit "Auto-build: ..." pertama muncul. Cuma buang auto-build yang gagal, histori lain (9 bulan dst) tetap utuh.'
+        type: string
+        required: false
+        default: ''
+
+jobs:
+  reset:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout branch
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.target_branch }}
+          fetch-depth: 0
+          persist-credentials: true
+          token: ${{ secrets.PAT_WORKFLOW }}
+
+      - name: Cari commit SHA tujuan
+        id: resolve
+        run: |
+          BRANCH="${{ github.event.inputs.target_branch }}"
+          COMMIT_SHA="${{ github.event.inputs.commit_sha }}"
+          FIND_SUBLEVEL="${{ github.event.inputs.find_sublevel }}"
+          BEFORE_AUTOBUILD="${{ github.event.inputs.before_first_autobuild }}"
+
+          if [ -n "$COMMIT_SHA" ]; then
+            TARGET_SHA="$COMMIT_SHA"
+            echo "Pakai SHA yang diisi manual: $TARGET_SHA"
+          elif [ "$BEFORE_AUTOBUILD" = "yes" ]; then
+            echo "Nyari commit 'Auto-build: ...' PALING PERTAMA (paling lama) di history $BRANCH..."
+            FIRST_AUTOBUILD=$(git log --reverse --grep="^Auto-build:" --format=%H | head -n1)
+            if [ -z "$FIRST_AUTOBUILD" ]; then
+              echo "::error::Nggak ketemu commit 'Auto-build: ...' manapun di history branch $BRANCH."
+              exit 1
+            fi
+            echo "Auto-build pertama yang rusak: $FIRST_AUTOBUILD ($(git log -1 --format='%s (%ci)' "$FIRST_AUTOBUILD"))"
+            TARGET_SHA="${FIRST_AUTOBUILD}^"
+            echo "Reset ke tepat sebelumnya: $TARGET_SHA ($(git log -1 --format='%s (%ci)' "$TARGET_SHA"))"
+          elif [ -n "$FIND_SUBLEVEL" ]; then
+            echo "Nyari commit TERBARU dengan SUBLEVEL=$FIND_SUBLEVEL di history Makefile..."
+            TARGET_SHA=""
+            for sha in $(git log --format=%H -- Makefile); do
+              LEVEL=$(git show "$sha:Makefile" 2>/dev/null | grep "^SUBLEVEL =" | awk '{print $3}')
+              if [ "$LEVEL" = "$FIND_SUBLEVEL" ]; then
+                TARGET_SHA="$sha"
+                break
+              fi
+            done
+            if [ -z "$TARGET_SHA" ]; then
+              echo "::error::Nggak ketemu commit manapun di history Makefile branch $BRANCH yang SUBLEVEL-nya = $FIND_SUBLEVEL."
+              exit 1
+            fi
+            echo "Ketemu: $TARGET_SHA ($(git log -1 --format='%s (%ci)' "$TARGET_SHA"))"
+          else
+            echo "::error::Isi salah satu: commit_sha, ATAU before_first_autobuild=yes (disaranin), ATAU find_sublevel."
+            exit 1
+          fi
+
+          echo "target_sha=$TARGET_SHA" >> "$GITHUB_OUTPUT"
+
+      - name: Reset ke commit & force push
+        run: |
+          BRANCH="${{ github.event.inputs.target_branch }}"
+          SHA="${{ steps.resolve.outputs.target_sha }}"
+
+          echo "Sebelum reset, HEAD di:"
+          git log -1 --oneline
+
+          # Pastiin commit-nya beneran ada di history branch ini sebelum reset,
+          # biar gak salah target/nyasar ke commit dari branch lain.
+          if ! git merge-base --is-ancestor "$SHA" HEAD 2>/dev/null && [ "$(git rev-parse HEAD)" != "$(git rev-parse "$SHA")" ]; then
+            if ! git cat-file -e "$SHA^{commit}" 2>/dev/null; then
+              echo "::error::Commit $SHA nggak ketemu di history branch $BRANCH. Cek lagi SHA-nya."
+              exit 1
+            fi
+          fi
+
+          git reset --hard "$SHA"
+
+          echo "Sesudah reset, HEAD di:"
+          git log -1 --oneline
+
+          git push --force origin HEAD:"$BRANCH"
