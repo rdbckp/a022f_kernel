@@ -1,4 +1,4 @@
-name: Build Up + OC (incremental, TEST ONLY - no push)
+name: Build TEST ONLY
 
 permissions:
   contents: read
