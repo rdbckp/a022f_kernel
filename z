@@ -1,4 +1,4 @@
-#!/bin/sh
+#!/bin/bash
 
 make mrproper
 set -e -x -o pipefail
