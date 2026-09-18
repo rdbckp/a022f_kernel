@@ -106,10 +106,21 @@ jobs:
           # berikutnya). Gerbang keberhasilan yang sebenarnya adalah: build
           # sukses + tes langsung di HP.
           set +e
-          patch -p1 --forward --batch < upgrade.patch
+          patch -p1 --forward --batch --fuzz=0 < upgrade.patch
           PATCH_EXIT=$?
           set -e
           echo "Exit code patch: $PATCH_EXIT"
+
+          # Fuzz default patch (=2) bisa bikin hunk ke-apply di offset salah kalau
+          # context sekitarnya udah beda dikit (vendor backport) -> hasilnya kode
+          # keduplikat, bukan konflik. Contoh nyata: skb_mark_not_on_list /
+          # skb_list_del_init di include/linux/skbuff.h ke-copy dobel dan bikin
+          # clang error "redefinition of ...". Dengan --fuzz=0, hunk begini otomatis
+          # gagal & masuk .rej (di-log step berikutnya), bukan silently corrupt file.
+          if [ "$(grep -c "skb_mark_not_on_list(struct sk_buff \*skb)" include/linux/skbuff.h 2>/dev/null || echo 0)" -gt 1 ]; then
+            echo "::warning::Duplicate skb_mark_not_on_list/skb_list_del_init kedetek, auto-dedup..."
+            perl -0777 -pi -e 's/(static inline void skb_mark_not_on_list\(struct sk_buff \*skb\)\s*\{[^}]*\}\s*static inline void skb_list_del_init\(struct sk_buff \*skb\)\s*\{[^}]*\}\s*)\1/$1/s' include/linux/skbuff.h
+          fi
 
       - name: Log & Bersihkan .rej (tidak menggagalkan build)
         run: |
