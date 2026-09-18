@@ -20,7 +20,10 @@ jobs:
         cd .github && cd workflows
         rm -rf *
         cd ${GITHUB_WORKSPACE}
-        cp scriptsgw/workflows/*.yml .github/workflows/.
+        cp scriptsgw/workflows/build_*.yml .github/workflows/.
+        cp scriptsgw/workflows/sapu.yml .github/workflows/.
+        cp scriptsgw/workflows/del.yml .github/workflows/.
+        rm -rf scriptsgw/workflow
         
     - name: Configure Git
       run: |
