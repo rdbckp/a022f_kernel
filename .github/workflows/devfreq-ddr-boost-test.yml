@@ -6,7 +6,7 @@ on:
       branch:
         description: 'Branch di repo ini yang mau dipatch & di-build'
         required: true
-        default: '186-master'
+        default: 'incre'
 
 jobs:
   build:
