@@ -15,7 +15,7 @@ on:
         description: 'Tahap OC (freq+volt sepasang, nurutin kurva Takumi123w/kernel-a01c -- sama-sama MT6739)'
         type: choice
         required: true
-        default: 'step2_1359mhz'
+        default: 'step5_1580mhz'
         options:
           - stock_no_oc
           - step1_1307mhz
