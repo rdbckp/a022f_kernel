@@ -15,7 +15,7 @@ on:
         description: 'Tahap OC (freq+volt sepasang, nurutin kurva Takumi123w/kernel-a01c -- sama-sama MT6739)'
         type: choice
         required: true
-        default: 'step5_1580mhz'
+        default: 'step6_1684mhz'
         options:
           - stock_no_oc
           - step1_1307mhz
@@ -237,6 +237,27 @@ jobs:
 
           echo "--- Preview hasil fix ---"
           grep -n -A3 -B3 "SPI_ADJUST_CFG0_SCK_LOW_OFFSET" "$FILE" || true
+
+      - name: Fix lib/random32.c (net_rand_state static mismatch)
+        run: |
+          FILE="lib/random32.c"
+
+          # Bukan dari .rej -- ini inkonsistensi lama di source: random32.c
+          # deklarasi "static", tapi prandom.h deklarasi non-static (extern,
+          # sengaja di-share ke file lain kayak net/core/utils.c). GCC cuma
+          # warning soal ini, tapi clang (dipakai di build kita) jadiin error
+          # keras. Fix: hapus "static" di random32.c biar cocok sama header.
+          if grep -q "^static DEFINE_PER_CPU(struct rnd_state, net_rand_state)" "$FILE"; then
+            sed -i 's/^static DEFINE_PER_CPU(struct rnd_state, net_rand_state)/DEFINE_PER_CPU(struct rnd_state, net_rand_state)/' "$FILE"
+            echo "Keyword 'static' dihapus dari deklarasi net_rand_state."
+          elif grep -q "^DEFINE_PER_CPU(struct rnd_state, net_rand_state)" "$FILE"; then
+            echo "Sudah non-static, skip."
+          else
+            echo "Pola net_rand_state nggak ketemu di level ini, skip."
+          fi
+
+          echo "--- Preview hasil fix ---"
+          grep -n "net_rand_state" "$FILE" || true
 
       - name: Tentukan freq & volt OC dari preset
         id: oc
