@@ -28,6 +28,10 @@ jobs:
           git apply --reject --whitespace=fix /tmp/01-devfreq_boost.patch || true
           git apply --reject --whitespace=fix /tmp/02-ddr-zygote-boost.patch || true
 
+      - name: Force-include devfreq_boost.h in fork.c (hunk context mismatch fix)
+        run: |
+          grep -q 'devfreq_boost.h' kernel/fork.c || sed -i '1i #include <linux/devfreq_boost.h>' kernel/fork.c
+
       - name: Report rejected hunks
         run: |
           RJ=$(find . -name "*.rej")
