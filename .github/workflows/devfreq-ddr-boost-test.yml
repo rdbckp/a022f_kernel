@@ -1,0 +1,70 @@
+name: Devfreq+DDR Boost Test Build (No Push)
+
+on:
+  workflow_dispatch:
+    inputs:
+      branch:
+        description: 'Branch di repo ini yang mau dipatch & di-build'
+        required: true
+        default: '186-master'
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout kernel source
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.branch }}
+          fetch-depth: 0
+
+      - name: Fetch patches from manteiga25/rainbow-kernel
+        run: |
+          curl -sL https://github.com/manteiga25/rainbow-kernel/commit/f930f93.patch -o /tmp/01-devfreq_boost.patch
+          curl -sL https://github.com/manteiga25/rainbow-kernel/commit/3e52755.patch -o /tmp/02-ddr-zygote-boost.patch
+
+      - name: Apply patches (reject hunks saved, not fatal)
+        run: |
+          git apply --reject --whitespace=fix /tmp/01-devfreq_boost.patch || true
+          git apply --reject --whitespace=fix /tmp/02-ddr-zygote-boost.patch || true
+
+      - name: Report rejected hunks
+        run: |
+          RJ=$(find . -name "*.rej")
+          if [ -n "$RJ" ]; then
+            echo "=== ADA HUNK YANG REJECT, cek manual ==="
+            for f in $RJ; do echo "--- $f ---"; cat "$f"; done
+          else
+            echo "Semua patch apply bersih, tidak ada .rej"
+          fi
+
+      - name: Build kernel
+        run: |
+          chmod +x ./z
+          set -o pipefail
+          ./z 2>&1 | tee build.log
+
+      - name: Verify build output
+        run: |
+          if [ -f out/arch/arm/boot/zImage-dtb ]; then
+            echo "Build sukses, zImage-dtb ada"
+          else
+            echo "=== BUILD GAGAL, tail build.log ==="
+            tail -n 150 build.log
+            exit 1
+          fi
+
+      - name: Package artifact (local only, no commit/push)
+        if: always()
+        run: |
+          mkdir -p artifact_out
+          [ -f out/arch/arm/boot/zImage-dtb ] && cp out/arch/arm/boot/zImage-dtb artifact_out/boot.img-kernel
+          cp build.log artifact_out/build.log
+          find . -name "*.rej" -exec cp {} artifact_out/ \;
+
+      - name: Upload artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: devfreq-ddr-boost-test-build
+          path: artifact_out/
