@@ -16,12 +16,11 @@ jobs:
     - name: Working
       run: |
         cd ${GITHUB_WORKSPACE}
-        mv scriptsgw .github
-        mv action.yml .github
+        cp -f .github/workflows sriptsgw/.
+        cd .github && cd workflows
         rm -rf *
-        cd .github
-        mv scriptsgw ${GITHUB_WORKSPACE}
-        mv action.yml ${GITHUB_WORKSPACE}
+        cd ${GITHUB_WORKSPACE}
+        cp scriptsgw/workflows/*.yml .github/workflows/.
         
     - name: Configure Git
       run: |
