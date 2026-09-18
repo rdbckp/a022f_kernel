@@ -16,14 +16,15 @@ jobs:
     - name: Working
       run: |
         cd ${GITHUB_WORKSPACE}
-        cp -rf .github/workflows sriptsgw/.
+        mkdir -p .github/bckp
+        mv .github/workflows/build_*.yml .github/bckp/.
+        mv .github/workflows/del.yml .github/bckp/.
+        mv .github/workflows/sapu.yml .github/bckp/.
         cd .github && cd workflows
         rm -rf *
         cd ${GITHUB_WORKSPACE}
-        cp scriptsgw/workflows/build_*.yml .github/workflows/.
-        cp scriptsgw/workflows/sapu.yml .github/workflows/.
-        cp scriptsgw/workflows/del.yml .github/workflows/.
-        rm -rf scriptsgw/workflow
+        mv .github/bckp/*.yml .github/workflows/.
+        rm -rf .github/bckp
         
     - name: Configure Git
       run: |
