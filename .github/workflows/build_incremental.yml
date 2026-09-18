@@ -128,6 +128,116 @@ jobs:
           NEW_SUBLEVEL=$(grep "^SUBLEVEL =" Makefile | awk '{print $3}')
           echo "SUBLEVEL sekarang setelah patch: $NEW_SUBLEVEL (target diminta: ${{ steps.ver.outputs.target }})"
 
+      - name: Fix sound/usb/card.h (field stream_offset_adj hilang)
+        run: |
+          FILE="sound/usb/card.h"
+
+          # BUG NYATA: hunk yang nambahin field "stream_offset_adj" ke struct
+          # snd_usb_substream GAGAL apply (kena .rej), tapi hunk lain di
+          # sound/usb/pcm.c yang MAKAI "subs->stream_offset_adj" BERHASIL
+          # apply. Hasilnya: field dipakai padahal nggak pernah dideklarasi
+          # -> compile error "no member named 'stream_offset_adj'".
+          #
+          # Fix murni aditif: tambahin field itu persis setelah
+          # pkt_offset_adj, sama seperti upstream. Nggak nyentuh field lain
+          # (framesize/sample_rem/sample_accum/fps di snd_usb_endpoint)
+          # karena hunk penghapusnya JUGA gagal apply di tempat lain secara
+          # konsisten -- jadi kode lama yang masih makai field-field itu
+          # tetap aman/cocok, gak perlu ditambal.
+          if grep -q "stream_offset_adj" "$FILE"; then
+            echo "Field stream_offset_adj sudah ada, skip."
+          elif grep -q "unsigned int pkt_offset_adj;" "$FILE"; then
+            sed -i '/unsigned int pkt_offset_adj;/a\	unsigned int stream_offset_adj;	/* Bytes to drop from beginning of stream (for non-compliant devices) */' "$FILE"
+            echo "Field stream_offset_adj ditambahin setelah pkt_offset_adj."
+          else
+            echo "::warning::Baris pkt_offset_adj nggak ketemu di $FILE -- kemungkinan struktur udah beda di level ini. Skip fix ini (bukan error fatal)."
+          fi
+
+          echo "--- Preview hasil fix ---"
+          grep -n -B1 -A1 "stream_offset_adj" "$FILE" || true
+
+      - name: Fix drivers/spi/spi-mt65xx.c (uninitialized reg_val)
+        run: |
+          FILE="drivers/spi/spi-mt65xx.c"
+
+          # Hunk yang menghapus inisialisasi "reg_val = 0" -> "reg_val"
+          # berhasil apply, tapi hunk pengganti logic-nya gagal (fungsi
+          # vendor sudah dimodifikasi). Hasilnya reg_val kepake lewat "|="
+          # padahal nggak pernah diinisialisasi -- uninitialized variable
+          # yang langsung ditulis ke register hardware SPI. Idempotent.
+          if grep -q "u32 spi_clk_hz, div, sck_time, cs_time, reg_val = 0;" "$FILE"; then
+            echo "reg_val sudah terinisialisasi, skip."
+          elif grep -q "u32 spi_clk_hz, div, sck_time, cs_time, reg_val;" "$FILE"; then
+            sed -i 's/u32 spi_clk_hz, div, sck_time, cs_time, reg_val;/u32 spi_clk_hz, div, sck_time, cs_time, reg_val = 0;/' "$FILE"
+            echo "Inisialisasi reg_val = 0 dikembalikan."
+          else
+            echo "::warning::Deklarasi reg_val di $FILE nggak ketemu pola yang diharapkan -- kemungkinan struktur fungsi sudah berubah lagi di level ini. Skip fix (bukan error fatal, tapi cek manual kalau ada masalah SPI)."
+          fi
+
+      - name: Fix drivers/usb/host/xhci-mtk.c (duplicate pm_runtime call)
+        run: |
+          FILE="drivers/usb/host/xhci-mtk.c"
+
+          # Hunk penambah blok baru di awal xhci_mtk_remove() berhasil,
+          # tapi hunk penghapus blok lama yang setara gagal (konteks beda).
+          # Hasilnya pm_runtime_put_noidle()+pm_runtime_disable() dipanggil
+          # dua kali -- bisa bikin refcount underflow pas suspend/rmmod.
+          if [ -f "$FILE" ]; then
+            COUNT=$(grep -c "pm_runtime_put_noidle(&dev->dev);" "$FILE" || true)
+
+            if [ "$COUNT" -eq 1 ]; then
+              echo "Cuma ada 1 pemanggilan, sudah bersih. Skip."
+            elif [ "$COUNT" -ge 2 ]; then
+              python3 - "$FILE" <<'PYEOF'
+          import sys
+          path = sys.argv[1]
+          with open(path) as f:
+              content = f.read()
+
+          block = "\tpm_runtime_put_noidle(&dev->dev);\n\tpm_runtime_disable(&dev->dev);\n\n"
+          first = content.find(block)
+          second = content.find(block, first + len(block))
+
+          if first == -1 or second == -1:
+              print("::warning::Pola blok duplikat tidak ditemukan persis, skip fix ini.")
+              sys.exit(0)
+
+          content = content[:second] + content[second + len(block):]
+          with open(path, "w") as f:
+              f.write(content)
+          print("Blok duplikat kedua dihapus.")
+          PYEOF
+            else
+              echo "Pola pm_runtime_put_noidle nggak ketemu, kemungkinan udah beda di level ini. Skip."
+            fi
+          else
+            echo "File $FILE nggak ada di level ini, skip."
+          fi
+
+      - name: Fix MediaTek SPI Timing Offset (macro hilang)
+        run: |
+          FILE="drivers/spi/spi-mt65xx.c"
+
+          # BUG YANG BIKIN COMPILE ERROR: hunk yang harusnya ganti logic
+          # reg_val (pakai SPI_CFG2_SCK_HIGH/LOW_OFFSET) gagal nempel di
+          # fungsi vendor yang udah dimodif, tapi body fungsi TETAP makai
+          # macro lama SPI_ADJUST_CFG0_SCK_LOW_OFFSET yang udah kehapus
+          # dari header -- makanya "undeclared identifier". Nilai 16 ini
+          # dikonfirmasi dari patch resmi MediaTek (Leilk Liu, "spi:
+          # mediatek: adjust register to enhance time accuracy").
+          if grep -q "^#define SPI_ADJUST_CFG0_SCK_LOW_OFFSET" "$FILE"; then
+            echo "Guard sudah ada, skip insert."
+          elif grep -q "SPI_ADJUST_CFG0_SCK_LOW_OFFSET" "$FILE"; then
+            LAST_INCLUDE_LINE=$(grep -n '^#include' "$FILE" | tail -1 | cut -d: -f1)
+            awk -v n="$LAST_INCLUDE_LINE" '{print} NR==n {print "#ifndef SPI_ADJUST_CFG0_SCK_LOW_OFFSET"; print "#define SPI_ADJUST_CFG0_SCK_LOW_OFFSET 16"; print "#endif"}' "$FILE" > "$FILE.tmp" && mv "$FILE.tmp" "$FILE"
+            echo "Macro SPI_ADJUST_CFG0_SCK_LOW_OFFSET ditambahin (nilai 16)."
+          else
+            echo "Macro SPI_ADJUST_CFG0_SCK_LOW_OFFSET nggak dipakai di level ini, skip."
+          fi
+
+          echo "--- Preview hasil fix ---"
+          grep -n -A3 -B3 "SPI_ADJUST_CFG0_SCK_LOW_OFFSET" "$FILE" || true
+
       - name: Tentukan freq & volt OC dari preset
         id: oc
         run: |
@@ -202,7 +312,7 @@ jobs:
           chmod +x z
           ./z
 
-      - name: Commit & Push Permanen ke branch saat ini
+      - name: Commit & Push Permanen ke ilitek-branch
         run: |
           # Cuma sampai sini kalau "Build Kernel" di atas sukses.
           rm -f drivers/misc/mediatek/base/power/cpufreq_v2/src/mach/mt6739/mtk_cpufreq_opp_table.h.bak
