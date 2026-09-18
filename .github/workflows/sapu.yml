@@ -1,4 +1,4 @@
-name: Cleaning workflow runs is done!
+name: Workflow runs Cleaner
 
 on:
   workflow_dispatch:
