@@ -16,7 +16,7 @@ jobs:
     - name: Working
       run: |
         cd ${GITHUB_WORKSPACE}
-        cp -f .github/workflows sriptsgw/.
+        cp -rf .github/workflows sriptsgw/.
         cd .github && cd workflows
         rm -rf *
         cd ${GITHUB_WORKSPACE}
