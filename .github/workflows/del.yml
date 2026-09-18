@@ -1,0 +1,35 @@
+name: Warning! Delete all
+
+on:
+  workflow_dispatch:
+
+jobs:
+  Cleaning:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+
+    - name: Working
+      run: |
+        cd ${GITHUB_WORKSPACE}
+        mv scriptsgw .github
+        mv action.yml .github
+        rm -rf *
+        cd .github
+        mv scriptsgw ${GITHUB_WORKSPACE}
+        mv action.yml ${GITHUB_WORKSPACE}
+        
+    - name: Configure Git
+      run: |
+        git config user.name "github-actions[bot]"
+        git config user.email "actions@github.com"
+        
+    - name: Add and Commit file
+      run: |
+        git add -A
+        git commit -m "Initial"
+        git push
