@@ -202,7 +202,7 @@ jobs:
           chmod +x z
           ./z
 
-      - name: Commit & Push Permanen ke ilitek-branch
+      - name: Commit & Push Permanen ke branch saat ini
         run: |
           # Cuma sampai sini kalau "Build Kernel" di atas sukses.
           rm -f drivers/misc/mediatek/base/power/cpufreq_v2/src/mach/mt6739/mtk_cpufreq_opp_table.h.bak
