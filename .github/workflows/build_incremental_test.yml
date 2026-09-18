@@ -111,16 +111,68 @@ jobs:
           set -e
           echo "Exit code patch: $PATCH_EXIT"
 
-          # Fuzz default patch (=2) bisa bikin hunk ke-apply di offset salah kalau
-          # context sekitarnya udah beda dikit (vendor backport) -> hasilnya kode
-          # keduplikat, bukan konflik. Contoh nyata: skb_mark_not_on_list /
-          # skb_list_del_init di include/linux/skbuff.h ke-copy dobel dan bikin
-          # clang error "redefinition of ...". Dengan --fuzz=0, hunk begini otomatis
-          # gagal & masuk .rej (di-log step berikutnya), bukan silently corrupt file.
-          if [ "$(grep -c "skb_mark_not_on_list(struct sk_buff \*skb)" include/linux/skbuff.h 2>/dev/null || echo 0)" -gt 1 ]; then
-            echo "::warning::Duplicate skb_mark_not_on_list/skb_list_del_init kedetek, auto-dedup..."
-            perl -0777 -pi -e 's/(static inline void skb_mark_not_on_list\(struct sk_buff \*skb\)\s*\{[^}]*\}\s*static inline void skb_list_del_init\(struct sk_buff \*skb\)\s*\{[^}]*\}\s*)\1/$1/s' include/linux/skbuff.h
-          fi
+      - name: Dedup Duplicate Definitions (efek offset patch vs vendor backport)
+        run: |
+          # git diff dihitung dari tag upstream bersih, tapi working tree kita
+          # fork vendor yang beberapa fungsinya udah di-backport manual duluan.
+          # Kadang context hunk tetap match persis (walau --fuzz=0) di lokasi lain
+          # di file yang sama -> fungsi ke-declare dua kali -> clang error
+          # "redefinition of ...". Contoh nyata: skb_mark_not_on_list/skb_list_del_init
+          # (include/linux/skbuff.h), array_size/array3_size/__ab_c_size (include/linux/overflow.h).
+          # Step ini scan SEMUA file yang kena patch, cari "static inline ... { ... }"
+          # yang bodinya sama persis lebih dari sekali dalam satu file, sisain yang pertama.
+          perl -e '
+            use strict; use warnings;
+            open(my $pf, "<", "upgrade.patch") or die $!;
+            my @files;
+            while (<$pf>) {
+              if (/^\+\+\+ b\/(\S+)/) {
+                my $p = $1;
+                push @files, $p if $p =~ /\.(c|h)$/;
+              }
+            }
+            close $pf;
+            my %seen; @files = grep { !$seen{$_}++ } @files;
+            for my $path (@files) {
+              open(my $fh, "<", $path) or next;
+              my @lines = <$fh>; close $fh; chomp @lines;
+              my %blocks; my $i = 0;
+              while ($i < @lines) {
+                if ($lines[$i] =~ /^static\s+inline\b[^\n\{;]*?\b(\w+)\s*\([^;\{]*\)\s*$/) {
+                  my $name = $1;
+                  if ($i+1 < @lines && $lines[$i+1] =~ /^\s*\{\s*$/) {
+                    my $depth = 0; my $j = $i+1;
+                    while ($j < @lines) {
+                      $depth += ($lines[$j] =~ tr/\{//) - ($lines[$j] =~ tr/\}//);
+                      last if $depth == 0; $j++;
+                    }
+                    push @{$blocks{$name}}, [$i, $j]; $i = $j+1; next;
+                  }
+                }
+                $i++;
+              }
+              my @to_remove;
+              for my $name (keys %blocks) {
+                my @occs = @{$blocks{$name}};
+                next if @occs < 2;
+                my $first = join("\n", @lines[$occs[0][0]..$occs[0][1]]);
+                for my $k (1..$#occs) {
+                  my ($s,$e) = @{$occs[$k]};
+                  my $body = join("\n", @lines[$s..$e]);
+                  push @to_remove, [$s,$e,$name] if $body eq $first;
+                }
+              }
+              next unless @to_remove;
+              for my $r (sort { $b->[0] <=> $a->[0] } @to_remove) {
+                my ($s,$e,$name) = @$r;
+                print "::warning::Dedup $name duplikat di $path (baris ".($s+1)."-".($e+1).")\n";
+                splice(@lines, $s, $e-$s+1);
+                splice(@lines, $s, 1) while $s < @lines && $lines[$s] =~ /^\s*$/;
+              }
+              open(my $out, ">", $path) or next;
+              print $out join("\n", @lines), "\n"; close $out;
+            }
+          '
 
       - name: Log & Bersihkan .rej (tidak menggagalkan build)
         run: |
