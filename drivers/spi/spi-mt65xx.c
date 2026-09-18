@@ -27,6 +27,9 @@
 #include <linux/spi/spi.h>
 #include <linux/dma-mapping.h>
 #include <linux/pm_qos.h>
+#ifndef SPI_ADJUST_CFG0_SCK_LOW_OFFSET
+#define SPI_ADJUST_CFG0_SCK_LOW_OFFSET 16
+#endif
 
 
 #define SPI_CFG0_REG                      0x0000
@@ -47,7 +50,6 @@
 #define SPI_CFG0_SCK_LOW_OFFSET           8
 #define SPI_CFG0_CS_HOLD_OFFSET           16
 #define SPI_CFG0_CS_SETUP_OFFSET          24
-#define SPI_ADJUST_CFG0_SCK_LOW_OFFSET    16
 #define SPI_ADJUST_CFG0_CS_HOLD_OFFSET    0
 #define SPI_ADJUST_CFG0_CS_SETUP_OFFSET   16
 
@@ -59,6 +61,8 @@
 #define SPI_CFG1_CS_IDLE_MASK             0xff
 #define SPI_CFG1_PACKET_LOOP_MASK         0xff00
 #define SPI_CFG1_PACKET_LENGTH_MASK       0x3ff0000
+#define SPI_CFG2_SCK_HIGH_OFFSET          0
+#define SPI_CFG2_SCK_LOW_OFFSET           16
 
 #define SPI_CMD_ACT                  BIT(0)
 #define SPI_CMD_RESUME               BIT(1)
