@@ -1,0 +1,237 @@
+name: Build Up + OC (incremental, auto-push)
+
+permissions:
+  contents: write
+
+on:
+  workflow_dispatch:
+    inputs:
+      target_sublevel:
+        description: 'Target SUBLEVEL 4.14.xxx (kosongin = auto naik 5 level dari SUBLEVEL sekarang)'
+        type: string
+        required: false
+        default: ''
+      oc_step:
+        description: 'Tahap OC (freq+volt sepasang, nurutin kurva Takumi123w/kernel-a01c -- sama-sama MT6739)'
+        type: choice
+        required: true
+        default: 'step2_1359mhz'
+        options:
+          - stock_no_oc
+          - step1_1307mhz
+          - step2_1359mhz
+          - step3_1411mhz
+          - step4_1476mhz
+          - step5_1580mhz
+          - step6_1684mhz
+          - step7_1801mhz_MAX_A01C
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Source Kernel
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.ref_name }}
+          fetch-depth: 1
+          persist-credentials: true
+
+      - name: Install Toolchain & Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y bc build-essential flex bison libssl-dev libelf-dev gcc-arm-linux-gnueabi
+
+      - name: Tentukan versi current & target
+        id: ver
+        run: |
+          CURRENT_SUBLEVEL=$(grep "^SUBLEVEL =" Makefile | awk '{print $3}')
+          echo "SUBLEVEL sekarang: $CURRENT_SUBLEVEL"
+
+          INPUT_TARGET="${{ github.event.inputs.target_sublevel }}"
+          if [ -n "$INPUT_TARGET" ]; then
+            TARGET_SUBLEVEL="$INPUT_TARGET"
+            echo "Target diisi manual: $TARGET_SUBLEVEL"
+          else
+            TARGET_SUBLEVEL=$((CURRENT_SUBLEVEL + 5))
+            echo "Target auto (current+5): $TARGET_SUBLEVEL"
+          fi
+
+          if [ "$TARGET_SUBLEVEL" -le "$CURRENT_SUBLEVEL" ]; then
+            echo "::error::Target ($TARGET_SUBLEVEL) harus lebih besar dari current ($CURRENT_SUBLEVEL)."
+            exit 1
+          fi
+
+          echo "current=$CURRENT_SUBLEVEL" >> "$GITHUB_OUTPUT"
+          echo "target=$TARGET_SUBLEVEL" >> "$GITHUB_OUTPUT"
+
+      - name: Apply Upstream Patch
+        run: |
+          CURRENT="${{ steps.ver.outputs.current }}"
+          TARGET="${{ steps.ver.outputs.target }}"
+
+          # git.kernel.org kadang kasih 502/503. Retry beberapa kali dulu,
+          # kalau tetap gagal baru coba mirror GitHub sebagai cadangan.
+          FETCH_OK=0
+          for i in 1 2 3; do
+            echo "Percobaan fetch ke git.kernel.org (ke-$i)..."
+            git remote add stable https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux-stable.git 2>/dev/null || true
+            if git fetch stable "tag" "v4.14.$CURRENT" "tag" "v4.14.$TARGET" --no-tags --depth 1; then
+              FETCH_OK=1
+              break
+            fi
+            echo "Gagal, tunggu sebentar sebelum retry..."
+            sleep 10
+          done
+
+          if [ "$FETCH_OK" -eq 0 ]; then
+            echo "::warning::git.kernel.org gagal terus, coba mirror GitHub (gregkh/linux)..."
+            git remote remove stable 2>/dev/null || true
+            git remote add stable https://github.com/gregkh/linux.git 2>/dev/null || true
+            if git fetch stable "tag" "v4.14.$CURRENT" "tag" "v4.14.$TARGET" --no-tags --depth 1; then
+              FETCH_OK=1
+            fi
+          fi
+
+          if [ "$FETCH_OK" -eq 0 ]; then
+            echo "::error::Tag v4.14.$CURRENT / v4.14.$TARGET nggak ketemu di git.kernel.org maupun mirror GitHub. Build dihentikan (nggak ada yang bisa di-upgrade)."
+            exit 1
+          fi
+
+          git diff "v4.14.$CURRENT" "v4.14.$TARGET" -- arch/arm/ drivers/ include/ kernel/ mm/ net/ sound/ Makefile > upgrade.patch
+
+          # Exit code patch != 0 itu WAJAR -- banyak file udah di-backport
+          # duluan sama vendor tree. Kita nggak berhenti di sini; .rej yang
+          # tersisa cuma di-log, bukan bikin build gagal (lihat step
+          # berikutnya). Gerbang keberhasilan yang sebenarnya adalah: build
+          # sukses + tes langsung di HP.
+          set +e
+          patch -p1 --forward --batch < upgrade.patch
+          PATCH_EXIT=$?
+          set -e
+          echo "Exit code patch: $PATCH_EXIT"
+
+      - name: Log & Bersihkan .rej (tidak menggagalkan build)
+        run: |
+          ALL_REJECTS=$(find . -name "*.rej" 2>/dev/null || true)
+          if [ -n "$ALL_REJECTS" ]; then
+            echo "::warning::Ada file .rej (hunk yang gagal apply otomatis, biasanya karena udah di-backport vendor tree). Isinya dicetak di bawah buat referensi, TIDAK menghentikan build:"
+            for f in $ALL_REJECTS; do
+              echo "--- $f ---"
+              cat "$f"
+            done
+            find . -name "*.rej" -delete
+          else
+            echo "Nggak ada .rej, patch nempel bersih semua."
+          fi
+
+          NEW_SUBLEVEL=$(grep "^SUBLEVEL =" Makefile | awk '{print $3}')
+          echo "SUBLEVEL sekarang setelah patch: $NEW_SUBLEVEL (target diminta: ${{ steps.ver.outputs.target }})"
+
+      - name: Tentukan freq & volt OC dari preset
+        id: oc
+        run: |
+          case "${{ github.event.inputs.oc_step }}" in
+            stock_no_oc)
+              SKIP_OC=1 ;;
+            step1_1307mhz)
+              SKIP_OC=0; FREQ=1307000; VOLT=117500 ;;
+            step2_1359mhz)
+              SKIP_OC=0; FREQ=1359000; VOLT=120000 ;;
+            step3_1411mhz)
+              SKIP_OC=0; FREQ=1411000; VOLT=122500 ;;
+            step4_1476mhz)
+              SKIP_OC=0; FREQ=1476000; VOLT=125000 ;;
+            step5_1580mhz)
+              SKIP_OC=0; FREQ=1580000; VOLT=126875 ;;
+            step6_1684mhz)
+              SKIP_OC=0; FREQ=1684000; VOLT=128750 ;;
+            step7_1801mhz_MAX_A01C)
+              SKIP_OC=0; FREQ=1801000; VOLT=130625 ;;
+            *)
+              echo "::error::oc_step tidak dikenali: ${{ github.event.inputs.oc_step }}"
+              exit 1
+              ;;
+          esac
+
+          if [ "$SKIP_OC" -eq 1 ]; then
+            echo "stock_no_oc dipilih, build polos tanpa patch OPP table."
+            echo "skip_oc=1" >> "$GITHUB_OUTPUT"
+          else
+            MAX_SAFE_VOLT=130625
+            if [ "$VOLT" -gt "$MAX_SAFE_VOLT" ]; then
+              echo "::error::Voltase $VOLT melebihi batas aman terverifikasi ($MAX_SAFE_VOLT). Build dihentikan."
+              exit 1
+            fi
+
+            echo "Step dipilih: ${{ github.event.inputs.oc_step }} -> FREQ=${FREQ}KHz, VOLT=${VOLT} (10uV)"
+            echo "skip_oc=0" >> "$GITHUB_OUTPUT"
+            echo "freq=$FREQ" >> "$GITHUB_OUTPUT"
+            echo "volt=$VOLT" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Backup file OPP table asli
+        if: steps.oc.outputs.skip_oc == '0'
+        run: |
+          OPP_FILE="drivers/misc/mediatek/base/power/cpufreq_v2/src/mach/mt6739/mtk_cpufreq_opp_table.h"
+          cp "$OPP_FILE" "$OPP_FILE.bak"
+
+      - name: Patch OC (sementara, cuma di runner ini)
+        if: steps.oc.outputs.skip_oc == '0'
+        run: |
+          OPP_FILE="drivers/misc/mediatek/base/power/cpufreq_v2/src/mach/mt6739/mtk_cpufreq_opp_table.h"
+          FREQ="${{ steps.oc.outputs.freq }}"
+          VOLT="${{ steps.oc.outputs.volt }}"
+
+          sed -i "s/^#define CPU_DVFS_FREQ0_LL_FY\\t\\t[0-9]*\\t\\t\\/\\* KHz \\*\\//#define CPU_DVFS_FREQ0_LL_FY\\t\\t${FREQ}\\t\\t\\/* KHz - OC *\\//" "$OPP_FILE"
+          sed -i "s/^#define CPU_DVFS_FREQ0_LL_SB\\t\\t[0-9]*\\t\\t\\/\\* KHz \\*\\//#define CPU_DVFS_FREQ0_LL_SB\\t\\t${FREQ}\\t\\t\\/* KHz - OC *\\//" "$OPP_FILE"
+          sed -i "s/^#define CPU_DVFS_FREQ0_LL_FY2\\t\\t[0-9]*\\t\\t\\/\\* KHz \\*\\//#define CPU_DVFS_FREQ0_LL_FY2\\t\\t${FREQ}\\t\\t\\/* KHz - OC *\\//" "$OPP_FILE"
+
+          sed -i "s/^#define CPU_DVFS_VOLT0_VPROC1_FY\\t [0-9]*\\t\\t\\/\\* 10uV \\*\\//#define CPU_DVFS_VOLT0_VPROC1_FY\\t ${VOLT}\\t\\t\\/* 10uV - OC *\\//" "$OPP_FILE"
+          sed -i "s/^#define CPU_DVFS_VOLT0_VPROC1_SB\\t [0-9]*\\t\\t\\/\\* 10uV \\*\\//#define CPU_DVFS_VOLT0_VPROC1_SB\\t ${VOLT}\\t\\t\\/* 10uV - OC *\\//" "$OPP_FILE"
+          sed -i "s/^#define CPU_DVFS_VOLT0_VPROC1_FY2\\t [0-9]*\\t\\t\\/\\* 10uV \\*\\//#define CPU_DVFS_VOLT0_VPROC1_FY2\\t ${VOLT}\\t\\t\\/* 10uV - OC *\\//" "$OPP_FILE"
+
+      - name: Tampilkan diff hasil patch OC
+        if: steps.oc.outputs.skip_oc == '0'
+        run: |
+          OPP_FILE="drivers/misc/mediatek/base/power/cpufreq_v2/src/mach/mt6739/mtk_cpufreq_opp_table.h"
+          diff -u "$OPP_FILE.bak" "$OPP_FILE" || true
+
+      - name: Build Kernel
+        run: |
+          chmod +x z
+          ./z
+
+      - name: Commit & Push Permanen ke ilitek-branch
+        run: |
+          # Cuma sampai sini kalau "Build Kernel" di atas sukses.
+          rm -f drivers/misc/mediatek/base/power/cpufreq_v2/src/mach/mt6739/mtk_cpufreq_opp_table.h.bak
+          rm -f upgrade.patch
+
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          git add -A
+
+          if git diff --cached --quiet; then
+            echo "Tidak ada perubahan untuk di-push."
+          else
+            git commit -m "Auto-build: naik ke SUBLEVEL ${{ steps.ver.outputs.target }} + OC ${{ github.event.inputs.oc_step }} [skip ci]"
+            git push origin HEAD:${{ github.ref_name }}
+          fi
+
+      - name: Package Output
+        run: |
+          cd out/arch/arm/boot
+          if [ -f "zImage-dtb" ]; then
+            cp zImage-dtb boot.img-kernel
+          else
+            echo "::warning::zImage-dtb tidak ditemukan, fallback ke zImage (DTB terpisah)."
+            cp zImage boot.img-kernel
+          fi
+
+      - name: Upload Kernel
+        uses: actions/upload-artifact@v4
+        with:
+          name: RooXie-v${{ steps.ver.outputs.target }}-${{ github.event.inputs.oc_step }}
+          path: out/arch/arm/boot/boot.img-kernel
