@@ -1,4 +1,4 @@
-name: Warning! Delete all
+name: Delete Some YML not needed anymore
 
 on:
   workflow_dispatch:
