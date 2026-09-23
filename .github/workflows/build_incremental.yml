@@ -1,0 +1,481 @@
+name: Build Up + OC (incremental, auto-push)
+
+permissions:
+  contents: write
+
+on:
+  workflow_dispatch:
+    inputs:
+      target_sublevel:
+        description: 'Target SUBLEVEL 4.14.xxx (kosongin = auto naik 5 level dari SUBLEVEL sekarang)'
+        type: string
+        required: false
+        default: ''
+      oc_step:
+        description: 'Tahap OC (freq+volt sepasang, nurutin kurva Takumi123w/kernel-a01c -- sama-sama MT6739)'
+        type: choice
+        required: true
+        default: 'step2_1359mhz'
+        options:
+          - stock_no_oc
+          - step1_1307mhz
+          - step2_1359mhz
+          - step3_1411mhz
+          - step4_1476mhz
+          - step5_1580mhz
+          - step6_1684mhz
+          - step7_1801mhz_MAX_A01C
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Source Kernel
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.ref_name }}
+          fetch-depth: 1
+          persist-credentials: true
+
+      - name: Install Toolchain & Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y bc build-essential flex bison libssl-dev libelf-dev gcc-arm-linux-gnueabi
+
+      - name: Tentukan versi current & target
+        id: ver
+        run: |
+          CURRENT_SUBLEVEL=$(grep "^SUBLEVEL =" Makefile | awk '{print $3}')
+          echo "SUBLEVEL sekarang: $CURRENT_SUBLEVEL"
+
+          INPUT_TARGET="${{ github.event.inputs.target_sublevel }}"
+          if [ -n "$INPUT_TARGET" ]; then
+            TARGET_SUBLEVEL="$INPUT_TARGET"
+            echo "Target diisi manual: $TARGET_SUBLEVEL"
+          else
+            TARGET_SUBLEVEL=$((CURRENT_SUBLEVEL + 5))
+            echo "Target auto (current+5): $TARGET_SUBLEVEL"
+          fi
+
+          if [ "$TARGET_SUBLEVEL" -le "$CURRENT_SUBLEVEL" ]; then
+            echo "::error::Target ($TARGET_SUBLEVEL) harus lebih besar dari current ($CURRENT_SUBLEVEL)."
+            exit 1
+          fi
+
+          echo "current=$CURRENT_SUBLEVEL" >> "$GITHUB_OUTPUT"
+          echo "target=$TARGET_SUBLEVEL" >> "$GITHUB_OUTPUT"
+
+      - name: Apply Upstream Patch
+        run: |
+          CURRENT="${{ steps.ver.outputs.current }}"
+          TARGET="${{ steps.ver.outputs.target }}"
+
+          # git.kernel.org kadang kasih 502/503. Retry beberapa kali dulu,
+          # kalau tetap gagal baru coba mirror GitHub sebagai cadangan.
+          FETCH_OK=0
+          for i in 1 2 3; do
+            echo "Percobaan fetch ke git.kernel.org (ke-$i)..."
+            git remote add stable https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux-stable.git 2>/dev/null || true
+            if git fetch stable "tag" "v4.14.$CURRENT" "tag" "v4.14.$TARGET" --no-tags --depth 1; then
+              FETCH_OK=1
+              break
+            fi
+            echo "Gagal, tunggu sebentar sebelum retry..."
+            sleep 10
+          done
+
+          if [ "$FETCH_OK" -eq 0 ]; then
+            echo "::warning::git.kernel.org gagal terus, coba mirror GitHub (gregkh/linux)..."
+            git remote remove stable 2>/dev/null || true
+            git remote add stable https://github.com/gregkh/linux.git 2>/dev/null || true
+            if git fetch stable "tag" "v4.14.$CURRENT" "tag" "v4.14.$TARGET" --no-tags --depth 1; then
+              FETCH_OK=1
+            fi
+          fi
+
+          if [ "$FETCH_OK" -eq 0 ]; then
+            echo "::error::Tag v4.14.$CURRENT / v4.14.$TARGET nggak ketemu di git.kernel.org maupun mirror GitHub. Build dihentikan (nggak ada yang bisa di-upgrade)."
+            exit 1
+          fi
+
+          git diff "v4.14.$CURRENT" "v4.14.$TARGET" -- arch/arm/ drivers/ include/ kernel/ mm/ net/ sound/ Makefile > upgrade.patch
+
+          # Exit code patch != 0 itu WAJAR -- banyak file udah di-backport
+          # duluan sama vendor tree. Kita nggak berhenti di sini; .rej yang
+          # tersisa cuma di-log, bukan bikin build gagal (lihat step
+          # berikutnya). Gerbang keberhasilan yang sebenarnya adalah: build
+          # sukses + tes langsung di HP.
+          set +e
+          patch -p1 --forward --batch < upgrade.patch
+          PATCH_EXIT=$?
+          set -e
+          echo "Exit code patch: $PATCH_EXIT"
+
+      - name: Log & Bersihkan .rej (tidak menggagalkan build)
+        run: |
+          ALL_REJECTS=$(find . -name "*.rej" 2>/dev/null || true)
+          if [ -n "$ALL_REJECTS" ]; then
+            echo "::warning::Ada file .rej (hunk yang gagal apply otomatis, biasanya karena udah di-backport vendor tree). Isinya dicetak di bawah buat referensi, TIDAK menghentikan build:"
+            for f in $ALL_REJECTS; do
+              echo "--- $f ---"
+              cat "$f"
+            done
+            find . -name "*.rej" -delete
+          else
+            echo "Nggak ada .rej, patch nempel bersih semua."
+          fi
+
+          NEW_SUBLEVEL=$(grep "^SUBLEVEL =" Makefile | awk '{print $3}')
+          echo "SUBLEVEL sekarang setelah patch: $NEW_SUBLEVEL (target diminta: ${{ steps.ver.outputs.target }})"
+
+      - name: Fix sound/usb/card.h (field stream_offset_adj hilang)
+        run: |
+          FILE="sound/usb/card.h"
+
+          # BUG NYATA: hunk yang nambahin field "stream_offset_adj" ke struct
+          # snd_usb_substream GAGAL apply (kena .rej), tapi hunk lain di
+          # sound/usb/pcm.c yang MAKAI "subs->stream_offset_adj" BERHASIL
+          # apply. Hasilnya: field dipakai padahal nggak pernah dideklarasi
+          # -> compile error "no member named 'stream_offset_adj'".
+          #
+          # Fix murni aditif: tambahin field itu persis setelah
+          # pkt_offset_adj, sama seperti upstream. Nggak nyentuh field lain
+          # (framesize/sample_rem/sample_accum/fps di snd_usb_endpoint)
+          # karena hunk penghapusnya JUGA gagal apply di tempat lain secara
+          # konsisten -- jadi kode lama yang masih makai field-field itu
+          # tetap aman/cocok, gak perlu ditambal.
+          if grep -q "stream_offset_adj" "$FILE"; then
+            echo "Field stream_offset_adj sudah ada, skip."
+          elif grep -q "unsigned int pkt_offset_adj;" "$FILE"; then
+            sed -i '/unsigned int pkt_offset_adj;/a\	unsigned int stream_offset_adj;	/* Bytes to drop from beginning of stream (for non-compliant devices) */' "$FILE"
+            echo "Field stream_offset_adj ditambahin setelah pkt_offset_adj."
+          else
+            echo "::warning::Baris pkt_offset_adj nggak ketemu di $FILE -- kemungkinan struktur udah beda di level ini. Skip fix ini (bukan error fatal)."
+          fi
+
+          echo "--- Preview hasil fix ---"
+          grep -n -B1 -A1 "stream_offset_adj" "$FILE" || true
+
+      - name: Fix drivers/spi/spi-mt65xx.c (uninitialized reg_val)
+        run: |
+          FILE="drivers/spi/spi-mt65xx.c"
+
+          # Hunk yang menghapus inisialisasi "reg_val = 0" -> "reg_val"
+          # berhasil apply, tapi hunk pengganti logic-nya gagal (fungsi
+          # vendor sudah dimodifikasi). Hasilnya reg_val kepake lewat "|="
+          # padahal nggak pernah diinisialisasi -- uninitialized variable
+          # yang langsung ditulis ke register hardware SPI. Idempotent.
+          if grep -q "u32 spi_clk_hz, div, sck_time, cs_time, reg_val = 0;" "$FILE"; then
+            echo "reg_val sudah terinisialisasi, skip."
+          elif grep -q "u32 spi_clk_hz, div, sck_time, cs_time, reg_val;" "$FILE"; then
+            sed -i 's/u32 spi_clk_hz, div, sck_time, cs_time, reg_val;/u32 spi_clk_hz, div, sck_time, cs_time, reg_val = 0;/' "$FILE"
+            echo "Inisialisasi reg_val = 0 dikembalikan."
+          else
+            echo "::warning::Deklarasi reg_val di $FILE nggak ketemu pola yang diharapkan -- kemungkinan struktur fungsi sudah berubah lagi di level ini. Skip fix (bukan error fatal, tapi cek manual kalau ada masalah SPI)."
+          fi
+
+      - name: Fix drivers/usb/host/xhci-mtk.c (duplicate pm_runtime call)
+        run: |
+          FILE="drivers/usb/host/xhci-mtk.c"
+
+          # Hunk penambah blok baru di awal xhci_mtk_remove() berhasil,
+          # tapi hunk penghapus blok lama yang setara gagal (konteks beda).
+          # Hasilnya pm_runtime_put_noidle()+pm_runtime_disable() dipanggil
+          # dua kali -- bisa bikin refcount underflow pas suspend/rmmod.
+          if [ -f "$FILE" ]; then
+            COUNT=$(grep -c "pm_runtime_put_noidle(&dev->dev);" "$FILE" || true)
+
+            if [ "$COUNT" -eq 1 ]; then
+              echo "Cuma ada 1 pemanggilan, sudah bersih. Skip."
+            elif [ "$COUNT" -ge 2 ]; then
+              python3 - "$FILE" <<'PYEOF'
+          import sys
+          path = sys.argv[1]
+          with open(path) as f:
+              content = f.read()
+
+          block = "\tpm_runtime_put_noidle(&dev->dev);\n\tpm_runtime_disable(&dev->dev);\n\n"
+          first = content.find(block)
+          second = content.find(block, first + len(block))
+
+          if first == -1 or second == -1:
+              print("::warning::Pola blok duplikat tidak ditemukan persis, skip fix ini.")
+              sys.exit(0)
+
+          content = content[:second] + content[second + len(block):]
+          with open(path, "w") as f:
+              f.write(content)
+          print("Blok duplikat kedua dihapus.")
+          PYEOF
+            else
+              echo "Pola pm_runtime_put_noidle nggak ketemu, kemungkinan udah beda di level ini. Skip."
+            fi
+          else
+            echo "File $FILE nggak ada di level ini, skip."
+          fi
+
+      - name: Fix MediaTek SPI Timing Offset (macro hilang)
+        run: |
+          FILE="drivers/spi/spi-mt65xx.c"
+
+          # BUG YANG BIKIN COMPILE ERROR: hunk yang harusnya ganti logic
+          # reg_val (pakai SPI_CFG2_SCK_HIGH/LOW_OFFSET) gagal nempel di
+          # fungsi vendor yang udah dimodif, tapi body fungsi TETAP makai
+          # macro lama SPI_ADJUST_CFG0_SCK_LOW_OFFSET yang udah kehapus
+          # dari header -- makanya "undeclared identifier". Nilai 16 ini
+          # dikonfirmasi dari patch resmi MediaTek (Leilk Liu, "spi:
+          # mediatek: adjust register to enhance time accuracy").
+          if grep -q "^#define SPI_ADJUST_CFG0_SCK_LOW_OFFSET" "$FILE"; then
+            echo "Guard sudah ada, skip insert."
+          elif grep -q "SPI_ADJUST_CFG0_SCK_LOW_OFFSET" "$FILE"; then
+            LAST_INCLUDE_LINE=$(grep -n '^#include' "$FILE" | tail -1 | cut -d: -f1)
+            awk -v n="$LAST_INCLUDE_LINE" '{print} NR==n {print "#ifndef SPI_ADJUST_CFG0_SCK_LOW_OFFSET"; print "#define SPI_ADJUST_CFG0_SCK_LOW_OFFSET 16"; print "#endif"}' "$FILE" > "$FILE.tmp" && mv "$FILE.tmp" "$FILE"
+            echo "Macro SPI_ADJUST_CFG0_SCK_LOW_OFFSET ditambahin (nilai 16)."
+          else
+            echo "Macro SPI_ADJUST_CFG0_SCK_LOW_OFFSET nggak dipakai di level ini, skip."
+          fi
+
+          echo "--- Preview hasil fix ---"
+          grep -n -A3 -B3 "SPI_ADJUST_CFG0_SCK_LOW_OFFSET" "$FILE" || true
+
+      - name: Fix lib/random32.c (net_rand_state static mismatch)
+        run: |
+          FILE="lib/random32.c"
+
+          # Bukan dari .rej -- ini inkonsistensi lama di source: random32.c
+          # deklarasi "static", tapi prandom.h deklarasi non-static (extern,
+          # sengaja di-share ke file lain kayak net/core/utils.c). GCC cuma
+          # warning soal ini, tapi clang (dipakai di build kita) jadiin error
+          # keras. Fix: hapus "static" di random32.c biar cocok sama header.
+          if grep -q "^static DEFINE_PER_CPU(struct rnd_state, net_rand_state)" "$FILE"; then
+            sed -i 's/^static DEFINE_PER_CPU(struct rnd_state, net_rand_state)/DEFINE_PER_CPU(struct rnd_state, net_rand_state)/' "$FILE"
+            echo "Keyword 'static' dihapus dari deklarasi net_rand_state."
+          elif grep -q "^DEFINE_PER_CPU(struct rnd_state, net_rand_state)" "$FILE"; then
+            echo "Sudah non-static, skip."
+          else
+            echo "Pola net_rand_state nggak ketemu di level ini, skip."
+          fi
+
+          echo "--- Preview hasil fix ---"
+          grep -n "net_rand_state" "$FILE" || true
+
+      - name: Fix mm/memory.c (cow_user_page signature lama)
+        run: |
+          FILE="mm/memory.c"
+
+          # Hunk yang update call site "cow_user_page(new_page, old_page,
+          # vmf->address, vma)" ke signature baru "cow_user_page(new_page,
+          # old_page, vmf)" gagal nempel (.rej), padahal definisi fungsinya
+          # di tempat lain udah ke-update ke 3 argumen (return bool). Hasil:
+          # call site lama masih makai 4 argumen -> "too many arguments".
+          if grep -qF 'cow_user_page(new_page, old_page, vmf->address, vma);' "$FILE"; then
+            python3 - "$FILE" <<'PYEOF'
+          import sys
+          path = sys.argv[1]
+          with open(path) as f:
+              content = f.read()
+
+          old = "\t\tcow_user_page(new_page, old_page, vmf->address, vma);\n"
+          new = (
+              "\t\tif (!cow_user_page(new_page, old_page, vmf)) {\n"
+              "\t\t\t/*\n"
+              "\t\t\t * COW failed, if the fault was solved by other,\n"
+              "\t\t\t * it's fine. If not, userspace would re-fault on\n"
+              "\t\t\t * the same address and we will handle the fault\n"
+              "\t\t\t * from the second attempt.\n"
+              "\t\t\t */\n"
+              "\t\t\tput_page(new_page);\n"
+              "\t\t\tif (old_page)\n"
+              "\t\t\t\tput_page(old_page);\n"
+              "\t\t\treturn 0;\n"
+              "\t\t}\n"
+          )
+
+          if old not in content:
+              print("::warning::Pola call cow_user_page lama nggak ketemu persis, skip fix.")
+              sys.exit(0)
+
+          content = content.replace(old, new, 1)
+          with open(path, "w") as f:
+              f.write(content)
+          print("Call site cow_user_page dibenerin ke signature baru (3 argumen + cek return).")
+          PYEOF
+          elif grep -qF 'if (!cow_user_page(new_page, old_page, vmf))' "$FILE"; then
+            echo "Sudah pakai signature baru, skip."
+          else
+            echo "Pola cow_user_page nggak ketemu di level ini, skip."
+          fi
+
+      - name: Fix include/linux/overflow.h (fungsi kedobel)
+        run: |
+          FILE="include/linux/overflow.h"
+
+          # Patch nempel sukses nambahin blok helper (array_size,
+          # array3_size, __ab_c_size, dst) yang TERNYATA udah ada duluan di
+          # file ini (vendor udah backport dari sumber lain). Hasilnya
+          # fungsi yang sama kedefinisi 2x -> "redefinition of ...".
+          # Dedup: buat tiap nama fungsi yang lebih dari 1x, cuma sisain
+          # definisi PERTAMA, buang sisanya.
+          python3 - "$FILE" <<'PYEOF'
+          import re
+          import sys
+
+          path = sys.argv[1]
+          with open(path) as f:
+              content = f.read()
+
+          pattern = re.compile(
+              r'^static inline __must_check \S+ (\w+)\([^)]*\)\s*\n\{',
+              re.MULTILINE,
+          )
+
+          matches = list(pattern.finditer(content))
+          seen = {}
+          spans_to_remove = []
+
+          for m in matches:
+              name = m.group(1)
+              start = m.start()
+              brace_start = content.index('{', m.end() - 1)
+              depth = 0
+              i = brace_start
+              while i < len(content):
+                  if content[i] == '{':
+                      depth += 1
+                  elif content[i] == '}':
+                      depth -= 1
+                      if depth == 0:
+                          break
+                  i += 1
+              end = i + 1
+              # ikutan makan newline setelah '}' biar gak nyisain baris kosong dobel
+              if end < len(content) and content[end] == '\n':
+                  end += 1
+
+              if name in seen:
+                  spans_to_remove.append((start, end))
+                  print(f"Duplikat ditemukan & bakal dibuang: {name}")
+              else:
+                  seen[name] = (start, end)
+
+          if not spans_to_remove:
+              print("Nggak ada fungsi kedobel, skip.")
+          else:
+              spans_to_remove.sort(reverse=True)
+              for start, end in spans_to_remove:
+                  content = content[:start] + content[end:]
+              with open(path, "w") as f:
+                  f.write(content)
+              print(f"{len(spans_to_remove)} definisi duplikat dibuang dari {path}.")
+          PYEOF
+
+          echo "--- Cek ulang, harusnya masing-masing cuma 1x ---"
+          grep -n "^static inline __must_check .* \(array_size\|array3_size\|__ab_c_size\)(" "$FILE" || true
+
+      - name: Tentukan freq & volt OC dari preset
+        id: oc
+        run: |
+          case "${{ github.event.inputs.oc_step }}" in
+            stock_no_oc)
+              SKIP_OC=1 ;;
+            step1_1307mhz)
+              SKIP_OC=0; FREQ=1307000; VOLT=117500 ;;
+            step2_1359mhz)
+              SKIP_OC=0; FREQ=1359000; VOLT=120000 ;;
+            step3_1411mhz)
+              SKIP_OC=0; FREQ=1411000; VOLT=122500 ;;
+            step4_1476mhz)
+              SKIP_OC=0; FREQ=1476000; VOLT=125000 ;;
+            step5_1580mhz)
+              SKIP_OC=0; FREQ=1580000; VOLT=126875 ;;
+            step6_1684mhz)
+              SKIP_OC=0; FREQ=1684000; VOLT=128750 ;;
+            step7_1801mhz_MAX_A01C)
+              SKIP_OC=0; FREQ=1801000; VOLT=130625 ;;
+            *)
+              echo "::error::oc_step tidak dikenali: ${{ github.event.inputs.oc_step }}"
+              exit 1
+              ;;
+          esac
+
+          if [ "$SKIP_OC" -eq 1 ]; then
+            echo "stock_no_oc dipilih, build polos tanpa patch OPP table."
+            echo "skip_oc=1" >> "$GITHUB_OUTPUT"
+          else
+            MAX_SAFE_VOLT=130625
+            if [ "$VOLT" -gt "$MAX_SAFE_VOLT" ]; then
+              echo "::error::Voltase $VOLT melebihi batas aman terverifikasi ($MAX_SAFE_VOLT). Build dihentikan."
+              exit 1
+            fi
+
+            echo "Step dipilih: ${{ github.event.inputs.oc_step }} -> FREQ=${FREQ}KHz, VOLT=${VOLT} (10uV)"
+            echo "skip_oc=0" >> "$GITHUB_OUTPUT"
+            echo "freq=$FREQ" >> "$GITHUB_OUTPUT"
+            echo "volt=$VOLT" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Backup file OPP table asli
+        if: steps.oc.outputs.skip_oc == '0'
+        run: |
+          OPP_FILE="drivers/misc/mediatek/base/power/cpufreq_v2/src/mach/mt6739/mtk_cpufreq_opp_table.h"
+          cp "$OPP_FILE" "$OPP_FILE.bak"
+
+      - name: Patch OC (sementara, cuma di runner ini)
+        if: steps.oc.outputs.skip_oc == '0'
+        run: |
+          OPP_FILE="drivers/misc/mediatek/base/power/cpufreq_v2/src/mach/mt6739/mtk_cpufreq_opp_table.h"
+          FREQ="${{ steps.oc.outputs.freq }}"
+          VOLT="${{ steps.oc.outputs.volt }}"
+
+          sed -i "s/^#define CPU_DVFS_FREQ0_LL_FY\\t\\t[0-9]*\\t\\t\\/\\* KHz \\*\\//#define CPU_DVFS_FREQ0_LL_FY\\t\\t${FREQ}\\t\\t\\/* KHz - OC *\\//" "$OPP_FILE"
+          sed -i "s/^#define CPU_DVFS_FREQ0_LL_SB\\t\\t[0-9]*\\t\\t\\/\\* KHz \\*\\//#define CPU_DVFS_FREQ0_LL_SB\\t\\t${FREQ}\\t\\t\\/* KHz - OC *\\//" "$OPP_FILE"
+          sed -i "s/^#define CPU_DVFS_FREQ0_LL_FY2\\t\\t[0-9]*\\t\\t\\/\\* KHz \\*\\//#define CPU_DVFS_FREQ0_LL_FY2\\t\\t${FREQ}\\t\\t\\/* KHz - OC *\\//" "$OPP_FILE"
+
+          sed -i "s/^#define CPU_DVFS_VOLT0_VPROC1_FY\\t [0-9]*\\t\\t\\/\\* 10uV \\*\\//#define CPU_DVFS_VOLT0_VPROC1_FY\\t ${VOLT}\\t\\t\\/* 10uV - OC *\\//" "$OPP_FILE"
+          sed -i "s/^#define CPU_DVFS_VOLT0_VPROC1_SB\\t [0-9]*\\t\\t\\/\\* 10uV \\*\\//#define CPU_DVFS_VOLT0_VPROC1_SB\\t ${VOLT}\\t\\t\\/* 10uV - OC *\\//" "$OPP_FILE"
+          sed -i "s/^#define CPU_DVFS_VOLT0_VPROC1_FY2\\t [0-9]*\\t\\t\\/\\* 10uV \\*\\//#define CPU_DVFS_VOLT0_VPROC1_FY2\\t ${VOLT}\\t\\t\\/* 10uV - OC *\\//" "$OPP_FILE"
+
+      - name: Tampilkan diff hasil patch OC
+        if: steps.oc.outputs.skip_oc == '0'
+        run: |
+          OPP_FILE="drivers/misc/mediatek/base/power/cpufreq_v2/src/mach/mt6739/mtk_cpufreq_opp_table.h"
+          diff -u "$OPP_FILE.bak" "$OPP_FILE" || true
+
+      - name: Build Kernel
+        run: |
+          chmod +x z
+          ./z
+
+      - name: Commit & Push Permanen ke ilitek-branch
+        run: |
+          # Cuma sampai sini kalau "Build Kernel" di atas sukses.
+          rm -f drivers/misc/mediatek/base/power/cpufreq_v2/src/mach/mt6739/mtk_cpufreq_opp_table.h.bak
+          rm -f upgrade.patch
+
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          git add -A
+
+          if git diff --cached --quiet; then
+            echo "Tidak ada perubahan untuk di-push."
+          else
+            git commit -m "Auto-build: naik ke SUBLEVEL ${{ steps.ver.outputs.target }} + OC ${{ github.event.inputs.oc_step }} [skip ci]"
+            git push origin HEAD:${{ github.ref_name }}
+          fi
+
+      - name: Package Output
+        run: |
+          cd out/arch/arm/boot
+          if [ -f "zImage-dtb" ]; then
+            cp zImage-dtb boot.img-kernel
+          else
+            echo "::warning::zImage-dtb tidak ditemukan, fallback ke zImage (DTB terpisah)."
+            cp zImage boot.img-kernel
+          fi
+
+      - name: Upload Kernel
+        uses: actions/upload-artifact@v4
+        with:
+          name: RooXie-v${{ steps.ver.outputs.target }}-${{ github.event.inputs.oc_step }}
+          path: out/arch/arm/boot/boot.img-kernel
