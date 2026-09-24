@@ -98,6 +98,7 @@ jobs:
             exit 1
           fi
 
+          mkdir -p /tmp/release
           git diff "v4.14.$CURRENT" "v4.14.$TARGET" -- arch/arm/ drivers/ include/ kernel/ mm/ net/ sound/ Makefile > upgrade.patch
 
           # Exit code patch != 0 itu WAJAR -- banyak file udah di-backport
@@ -106,14 +107,20 @@ jobs:
           # berikutnya). Gerbang keberhasilan yang sebenarnya adalah: build
           # sukses + tes langsung di HP.
           set +e
-          patch -p1 --forward --batch < upgrade.patch
+          patch -p1 --forward --batch --no-backup-if-mismatch < upgrade.patch
           PATCH_EXIT=$?
           set -e
           echo "Exit code patch: $PATCH_EXIT"
 
       - name: Log & Bersihkan .rej (tidak menggagalkan build)
         run: |
+          mkdir -p /tmp/release
           ALL_REJECTS=$(find . -name "*.rej" 2>/dev/null || true)
+          if [ -n "$ALL_REJECTS" ]; then
+            echo "$ALL_REJECTS" | sed 's|^\./||' | sort > /tmp/release/rej_list.txt
+          else
+            : > /tmp/release/rej_list.txt
+          fi
           if [ -n "$ALL_REJECTS" ]; then
             echo "::warning::Ada file .rej (hunk yang gagal apply otomatis, biasanya karena udah di-backport vendor tree). Isinya dicetak di bawah buat referensi, TIDAK menghentikan build:"
             for f in $ALL_REJECTS; do
@@ -121,6 +128,7 @@ jobs:
               cat "$f"
             done
             find . -name "*.rej" -delete
+            find . \( -path ./out -o -path ./toolchain -o -path ./.git \) -prune -o -name "*.orig" -type f -delete
           else
             echo "Nggak ada .rej, patch nempel bersih semua."
           fi
@@ -461,6 +469,30 @@ jobs:
           echo "--- Preview hasil fix ---"
           grep -n "khugepaged_min_free_kbytes_update" "$FILE" || true
 
+      - name: Fix mm/page_alloc.c (include khugepaged.h gagal nempel)
+        run: |
+          FILE="mm/page_alloc.c"
+
+          # ROOT CAUSE error link "undefined reference to
+          # 'khugepaged_min_free_kbytes_update'": hunk #1 di page_alloc.c
+          # (#include <linux/khugepaged.h>) GAGAL apply (.rej), tapi hunk #2
+          # yang MANGGIL khugepaged_min_free_kbytes_update() berhasil nempel.
+          # KCFLAGS=-w nyembunyiin warning implicit declaration, jadi lolos
+          # compile lalu meledak di link. Fix: sisipkan include-nya.
+          if grep -q '^#include <linux/khugepaged.h>' "$FILE"; then
+            echo "Include khugepaged.h sudah ada, skip."
+          elif grep -q '^#include <linux/nmi.h>' "$FILE"; then
+            sed -i '0,/^#include <linux\/nmi.h>/s//#include <linux\/nmi.h>\n#include <linux\/khugepaged.h>/' "$FILE"
+            echo "Include khugepaged.h ditambahin setelah nmi.h."
+          else
+            LAST=$(grep -n '^#include <linux/' "$FILE" | tail -1 | cut -d: -f1)
+            sed -i "${LAST}a #include <linux/khugepaged.h>" "$FILE"
+            echo "Include khugepaged.h ditambahin setelah include <linux/*> terakhir (baris $LAST)."
+          fi
+
+          echo "--- Preview hasil fix ---"
+          grep -n "khugepaged" "$FILE" || true
+
       - name: Tentukan freq & volt OC dari preset
         id: oc
         run: |
@@ -535,25 +567,7 @@ jobs:
           chmod +x z
           ./z
 
-      - name: Commit & Push Permanen ke ilitek-branch
-        run: |
-          # Cuma sampai sini kalau "Build Kernel" di atas sukses.
-          rm -f drivers/misc/mediatek/base/power/cpufreq_v2/src/mach/mt6739/mtk_cpufreq_opp_table.h.bak
-          rm -f upgrade.patch
-
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-
-          git add -A
-
-          if git diff --cached --quiet; then
-            echo "Tidak ada perubahan untuk di-push."
-          else
-            git commit -m "Auto-build: naik ke SUBLEVEL ${{ steps.ver.outputs.target }} + OC ${{ github.event.inputs.oc_step }} [skip ci]"
-            git push origin HEAD:${{ github.ref_name }}
-          fi
-
-      - name: Package Output
+      - name: Package boot.img-kernel
         run: |
           cd out/arch/arm/boot
           if [ -f "zImage-dtb" ]; then
@@ -562,9 +576,123 @@ jobs:
             echo "::warning::zImage-dtb tidak ditemukan, fallback ke zImage (DTB terpisah)."
             cp zImage boot.img-kernel
           fi
+          ls -l boot.img-kernel
 
-      - name: Upload Kernel
+      - name: Buat changelog upstream & zip release
+        env:
+          CURRENT: ${{ steps.ver.outputs.current }}
+          TARGET: ${{ steps.ver.outputs.target }}
+          OC_STEP: ${{ github.event.inputs.oc_step }}
+        run: |
+          mkdir -p /tmp/release
+          CL="/tmp/release/CHANGELOG-4.14.${CURRENT}-to-4.14.${TARGET}.txt"
+          NEW_SUBLEVEL=$(grep "^SUBLEVEL =" Makefile | awk '{print $3}')
+
+          {
+            echo "=============================================================="
+            echo " a022f_kernel - Changelog Progress Upstream"
+            echo "=============================================================="
+            echo "Tanggal build   : $(date -u '+%Y-%m-%d %H:%M UTC')"
+            echo "Upstream        : linux-stable 4.14.${CURRENT} -> 4.14.${TARGET}"
+            echo "SUBLEVEL hasil  : ${NEW_SUBLEVEL}"
+            echo "Preset OC       : ${OC_STEP}"
+            echo "Branch          : ${GITHUB_REF_NAME}"
+            echo "Commit          : ${GITHUB_SHA}"
+            echo "Workflow run    : #${GITHUB_RUN_NUMBER}"
+            echo ""
+            echo "--------------------------------------------------------------"
+            echo " Hunk yang gagal apply otomatis (.rej, sudah di-skip)"
+            echo "--------------------------------------------------------------"
+            if [ -s /tmp/release/rej_list.txt ]; then
+              sed 's/^/  - /' /tmp/release/rej_list.txt
+            else
+              echo "  (tidak ada, semua hunk nempel bersih)"
+            fi
+            echo ""
+            echo "--------------------------------------------------------------"
+            echo " Fix manual otomatis yang dijalankan workflow"
+            echo "--------------------------------------------------------------"
+            echo "  - sound/usb/card.h        : field stream_offset_adj"
+            echo "  - drivers/spi/spi-mt65xx.c: reg_val = 0 & macro SPI_ADJUST_CFG0_SCK_LOW_OFFSET"
+            echo "  - drivers/usb/host/xhci-mtk.c: dedup pm_runtime_put_noidle/disable"
+            echo "  - lib/random32.c          : net_rand_state non-static"
+            echo "  - mm/memory.c             : cow_user_page signature baru"
+            echo "  - include/linux/overflow.h: dedup helper"
+            echo "  - drivers/hid/hid-core.c  : dedup hid_compute_report_size"
+            echo "  - include/linux/khugepaged.h & mm/page_alloc.c: include + fallback khugepaged"
+            echo ""
+            echo "--------------------------------------------------------------"
+            echo " Daftar commit upstream (linux-stable ChangeLog)"
+            echo "--------------------------------------------------------------"
+          } > "$CL"
+
+          for n in $(seq $((CURRENT + 1)) "$TARGET"); do
+            URL="https://cdn.kernel.org/pub/linux/kernel/v4.x/ChangeLog-4.14.${n}"
+            {
+              echo ""
+              echo "### Linux 4.14.${n}"
+            } >> "$CL"
+            if curl -fsSL --retry 3 --retry-delay 5 "$URL" -o "/tmp/cl_${n}.txt"; then
+              awk '/^commit [0-9a-f]+/ {s=1; next} s==1 && /^$/ {s=2; next} s==2 {sub(/^    /, ""); print "  - " $0; s=0}' "/tmp/cl_${n}.txt" >> "$CL"
+            else
+              echo "  (ChangeLog-4.14.${n} gagal diunduh dari kernel.org)" >> "$CL"
+            fi
+          done
+
+          echo ""
+          echo "Ringkasan changelog:"
+          wc -l "$CL"
+
+          ZIP_NAME="RooXie-v4.14.${TARGET}-${OC_STEP}-run${GITHUB_RUN_NUMBER}.zip"
+          cp out/arch/arm/boot/boot.img-kernel /tmp/release/boot.img-kernel
+          (cd /tmp/release && zip -j "$ZIP_NAME" boot.img-kernel "$(basename "$CL")")
+          ls -l "/tmp/release/$ZIP_NAME"
+
+          echo "ZIP_NAME=$ZIP_NAME" >> "$GITHUB_ENV"
+
+          {
+            echo "Kernel Samsung A022F - upstream 4.14.${CURRENT} -> 4.14.${TARGET}"
+            echo ""
+            echo "- Preset OC: ${OC_STEP}"
+            echo "- Isi zip: boot.img-kernel + changelog upstream (txt)"
+            echo "- Build: workflow run #${GITHUB_RUN_NUMBER}"
+          } > /tmp/release/notes.md
+
+      - name: Commit & Push Permanen ke branch
+        run: |
+          # Cuma sampai sini kalau "Build Kernel" di atas sukses.
+          rm -f drivers/misc/mediatek/base/power/cpufreq_v2/src/mach/mt6739/mtk_cpufreq_opp_table.h.bak
+          rm -f upgrade.patch
+
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          git add -A -- . ':(exclude)out' ':(exclude)build.log'
+
+          if git diff --cached --quiet; then
+            echo "Tidak ada perubahan untuk di-push."
+          else
+            git commit -m "Auto-build: naik ke SUBLEVEL ${{ steps.ver.outputs.target }} + OC ${{ github.event.inputs.oc_step }} [skip ci]"
+            git push origin HEAD:${{ github.ref_name }}
+          fi
+
+      - name: Upload Kernel (artifact)
         uses: actions/upload-artifact@v4
         with:
           name: RooXie-v${{ steps.ver.outputs.target }}-${{ github.event.inputs.oc_step }}
-          path: out/arch/arm/boot/boot.img-kernel
+          path: |
+            out/arch/arm/boot/boot.img-kernel
+            /tmp/release/${{ env.ZIP_NAME }}
+
+      - name: Publish ke GitHub Releases
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TARGET: ${{ steps.ver.outputs.target }}
+          OC_STEP: ${{ github.event.inputs.oc_step }}
+        run: |
+          TAG="v4.14.${TARGET}-${OC_STEP}-r${GITHUB_RUN_NUMBER}-${GITHUB_RUN_ATTEMPT}"
+          gh release create "$TAG" "/tmp/release/${ZIP_NAME}" \
+            --repo "$GITHUB_REPOSITORY" \
+            --target "$(git rev-parse HEAD)" \
+            --title "RooXie 4.14.${TARGET} - ${OC_STEP} (run #${GITHUB_RUN_NUMBER})" \
+            --notes-file /tmp/release/notes.md
