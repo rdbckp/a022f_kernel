@@ -128,7 +128,7 @@ jobs:
               cat "$f"
             done
             find . -name "*.rej" -delete
-            find . \( -path ./out -o -path ./toolchain -o -path ./.git \) -prune -o -name "*.orig" -type f -delete
+            find . \( -path ./out -o -path ./toolchain -o -path ./.git \) -prune -o -name "*.orig" -type f -exec rm -f {} +
           else
             echo "Nggak ada .rej, patch nempel bersih semua."
           fi
