@@ -659,22 +659,64 @@ jobs:
           } > /tmp/release/notes.md
 
       - name: Commit & Push Permanen ke branch
+        id: push
+        env:
+          BRANCH: ${{ github.ref_name }}
+          TARGET: ${{ steps.ver.outputs.target }}
+          OC_STEP: ${{ github.event.inputs.oc_step }}
         run: |
           # Cuma sampai sini kalau "Build Kernel" di atas sukses.
+          # Step ini TIDAK PERNAH bikin job gagal: kalau push ditolak, kernel
+          # hasil build tetap dirilis ke Releases.
           rm -f drivers/misc/mediatek/base/power/cpufreq_v2/src/mach/mt6739/mtk_cpufreq_opp_table.h.bak
           rm -f upgrade.patch
+          find . \( -path ./out -o -path ./toolchain -o -path ./.git \) -prune -o \( -name "*.rej" -o -name "*.orig" \) -type f -exec rm -f {} + || true
 
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
+          PUSHED=0
+          set +e
+
           git add -A -- . ':(exclude)out' ':(exclude)build.log'
+          echo "git add exit: $?"
+
+          # Buang file > 90MB dari staging (GitHub nolak push file >100MB)
+          git diff --cached --name-only --diff-filter=AM -z | while IFS= read -r -d '' f; do
+            if [ -f "$f" ] && [ "$(stat -c%s "$f")" -gt 94371840 ]; then
+              echo "::warning::File $f > 90MB, dikeluarkan dari commit."
+              git reset -q HEAD -- "$f"
+            fi
+          done
+
+          echo "--- Ringkasan perubahan staged ---"
+          git diff --cached --shortstat
 
           if git diff --cached --quiet; then
             echo "Tidak ada perubahan untuk di-push."
+            PUSHED=1
           else
-            git commit -m "Auto-build: naik ke SUBLEVEL ${{ steps.ver.outputs.target }} + OC ${{ github.event.inputs.oc_step }} [skip ci]"
-            git push origin HEAD:${{ github.ref_name }}
+            git commit -q -m "Auto-build: naik ke SUBLEVEL ${TARGET} + OC ${OC_STEP} [skip ci]"
+            echo "git commit exit: $?"
+
+            for i in 1 2 3; do
+              echo "Push percobaan ke-$i..."
+              if git push origin "HEAD:${BRANCH}"; then
+                PUSHED=1
+                break
+              fi
+              sleep 5
+            done
+
+            if [ "$PUSHED" -eq 0 ]; then
+              echo "::warning::Push ke ${BRANCH} gagal. Kernel tetap dirilis ke Releases. Diagnostik di bawah."
+              git log -1 --stat --format=%H | tail -15
+              git ls-files -z | xargs -0 -r stat -c '%s %n' 2>/dev/null | sort -rn | head -5
+            fi
           fi
+
+          echo "pushed=$PUSHED" >> "$GITHUB_OUTPUT"
+          exit 0
 
       - name: Upload Kernel (artifact)
         uses: actions/upload-artifact@v4
@@ -689,10 +731,17 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           TARGET: ${{ steps.ver.outputs.target }}
           OC_STEP: ${{ github.event.inputs.oc_step }}
+          PUSHED: ${{ steps.push.outputs.pushed }}
+          BRANCH: ${{ github.ref_name }}
         run: |
           TAG="v4.14.${TARGET}-${OC_STEP}-r${GITHUB_RUN_NUMBER}-${GITHUB_RUN_ATTEMPT}"
+          if [ "$PUSHED" = "1" ]; then
+            REL_TARGET="$(git rev-parse HEAD)"
+          else
+            REL_TARGET="$BRANCH"
+          fi
           gh release create "$TAG" "/tmp/release/${ZIP_NAME}" \
             --repo "$GITHUB_REPOSITORY" \
-            --target "$(git rev-parse HEAD)" \
+            --target "$REL_TARGET" \
             --title "RooXie 4.14.${TARGET} - ${OC_STEP} (run #${GITHUB_RUN_NUMBER})" \
             --notes-file /tmp/release/notes.md
