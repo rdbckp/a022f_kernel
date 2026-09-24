@@ -434,6 +434,33 @@ jobs:
           echo "--- Cek ulang, harusnya cuma 1x ---"
           grep -n "^static size_t hid_compute_report_size" "$FILE" || true
 
+      - name: Fix include/linux/khugepaged.h (khugepaged_min_free_kbytes_update belum ada definisi)
+        run: |
+          FILE="include/linux/khugepaged.h"
+          DEFCONFIG="arch/arm/configs/a02_defconfig"
+
+          # BUG: hunk yang nambahin "extern void
+          # khugepaged_min_free_kbytes_update(void);" ke header ini nempel
+          # sukses, dan hunk pemanggilnya di mm/page_alloc.c (dari
+          # init_per_zone_wmark_min()) juga nempel. Tapi definisi fungsinya
+          # cuma ada di mm/khugepaged.c, yang di config a02_defconfig ini
+          # CONFIG_TRANSPARENT_HUGEPAGE nggak diaktifkan -> mm/khugepaged.c
+          # nggak ikut kecompile -> linker teriak "undefined reference to
+          # 'khugepaged_min_free_kbytes_update'" pas link vmlinux.
+          if grep -q "^CONFIG_TRANSPARENT_HUGEPAGE=y" "$DEFCONFIG" 2>/dev/null; then
+            echo "CONFIG_TRANSPARENT_HUGEPAGE aktif di $DEFCONFIG, mm/khugepaged.c seharusnya ikut kecompile. Skip fix ini (kalau masih undefined reference, cek manual)."
+          elif grep -qE '^\s*static inline void khugepaged_min_free_kbytes_update\(void\)' "$FILE"; then
+            echo "Sudah ada fallback static inline, skip."
+          elif grep -qE '^\s*extern void khugepaged_min_free_kbytes_update\(void\);' "$FILE"; then
+            sed -i -E 's/^\s*extern void khugepaged_min_free_kbytes_update\(void\);/static inline void khugepaged_min_free_kbytes_update(void) { }/' "$FILE"
+            echo "extern diganti jadi static inline no-op (CONFIG_TRANSPARENT_HUGEPAGE off, definisi asli di mm/khugepaged.c nggak kecompile)."
+          else
+            echo "::warning::Deklarasi khugepaged_min_free_kbytes_update nggak ketemu di $FILE -- kemungkinan struktur udah beda. Skip fix (bukan error fatal, tapi cek manual kalau masih undefined reference pas link)."
+          fi
+
+          echo "--- Preview hasil fix ---"
+          grep -n "khugepaged_min_free_kbytes_update" "$FILE" || true
+
       - name: Tentukan freq & volt OC dari preset
         id: oc
         run: |
