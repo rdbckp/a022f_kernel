@@ -541,20 +541,42 @@ jobs:
           OPP_FILE="drivers/misc/mediatek/base/power/cpufreq_v2/src/mach/mt6739/mtk_cpufreq_opp_table.h"
           cp "$OPP_FILE" "$OPP_FILE.bak"
 
-      - name: Patch OC (sementara, cuma di runner ini)
+      - name: Patch OC (freq & volt, tahan komentar apa pun)
         if: steps.oc.outputs.skip_oc == '0'
         run: |
           OPP_FILE="drivers/misc/mediatek/base/power/cpufreq_v2/src/mach/mt6739/mtk_cpufreq_opp_table.h"
           FREQ="${{ steps.oc.outputs.freq }}"
           VOLT="${{ steps.oc.outputs.volt }}"
 
-          sed -i "s/^#define CPU_DVFS_FREQ0_LL_FY\\t\\t[0-9]*\\t\\t\\/\\* KHz \\*\\//#define CPU_DVFS_FREQ0_LL_FY\\t\\t${FREQ}\\t\\t\\/* KHz - OC *\\//" "$OPP_FILE"
-          sed -i "s/^#define CPU_DVFS_FREQ0_LL_SB\\t\\t[0-9]*\\t\\t\\/\\* KHz \\*\\//#define CPU_DVFS_FREQ0_LL_SB\\t\\t${FREQ}\\t\\t\\/* KHz - OC *\\//" "$OPP_FILE"
-          sed -i "s/^#define CPU_DVFS_FREQ0_LL_FY2\\t\\t[0-9]*\\t\\t\\/\\* KHz \\*\\//#define CPU_DVFS_FREQ0_LL_FY2\\t\\t${FREQ}\\t\\t\\/* KHz - OC *\\//" "$OPP_FILE"
+          # Regex lama cuma cocok kalau komentar persis "/* KHz */". Setelah run
+          # sebelumnya ke-commit permanen jadi "/* KHz - OC */" (angka 1580000
+          # nyangkut), sed nggak kena apa-apa. Sekarang cukup cocokin nama
+          # macro + ganti angka pertama, sisa baris/komentar dibiarin.
+          for NAME in CPU_DVFS_FREQ0_LL_FY CPU_DVFS_FREQ0_LL_SB CPU_DVFS_FREQ0_LL_FY2; do
+            sed -i -E "s/^([[:space:]]*#define[[:space:]]+${NAME}[[:space:]]+)[0-9]+/\1${FREQ}/" "$OPP_FILE"
+          done
+          for NAME in CPU_DVFS_VOLT0_VPROC1_FY CPU_DVFS_VOLT0_VPROC1_SB CPU_DVFS_VOLT0_VPROC1_FY2; do
+            sed -i -E "s/^([[:space:]]*#define[[:space:]]+${NAME}[[:space:]]+)[0-9]+/\1${VOLT}/" "$OPP_FILE"
+          done
 
-          sed -i "s/^#define CPU_DVFS_VOLT0_VPROC1_FY\\t [0-9]*\\t\\t\\/\\* 10uV \\*\\//#define CPU_DVFS_VOLT0_VPROC1_FY\\t ${VOLT}\\t\\t\\/* 10uV - OC *\\//" "$OPP_FILE"
-          sed -i "s/^#define CPU_DVFS_VOLT0_VPROC1_SB\\t [0-9]*\\t\\t\\/\\* 10uV \\*\\//#define CPU_DVFS_VOLT0_VPROC1_SB\\t ${VOLT}\\t\\t\\/* 10uV - OC *\\//" "$OPP_FILE"
-          sed -i "s/^#define CPU_DVFS_VOLT0_VPROC1_FY2\\t [0-9]*\\t\\t\\/\\* 10uV \\*\\//#define CPU_DVFS_VOLT0_VPROC1_FY2\\t ${VOLT}\\t\\t\\/* 10uV - OC *\\//" "$OPP_FILE"
+          echo "--- Verifikasi nilai akhir ---"
+          FAIL=0
+          for NAME in CPU_DVFS_FREQ0_LL_FY CPU_DVFS_FREQ0_LL_SB CPU_DVFS_FREQ0_LL_FY2; do
+            VAL=$(grep -E "^[[:space:]]*#define[[:space:]]+${NAME}[[:space:]]" "$OPP_FILE" | head -1 | awk '{print $3}')
+            echo "$NAME = $VAL (target $FREQ)"
+            [ "$VAL" = "$FREQ" ] || FAIL=1
+          done
+          for NAME in CPU_DVFS_VOLT0_VPROC1_FY CPU_DVFS_VOLT0_VPROC1_SB CPU_DVFS_VOLT0_VPROC1_FY2; do
+            VAL=$(grep -E "^[[:space:]]*#define[[:space:]]+${NAME}[[:space:]]" "$OPP_FILE" | head -1 | awk '{print $3}')
+            echo "$NAME = $VAL (target $VOLT)"
+            [ "$VAL" = "$VOLT" ] || FAIL=1
+          done
+
+          if [ "$FAIL" -eq 1 ]; then
+            echo "::error::Patch OC nggak kena (nama macro/format di $OPP_FILE beda dari yang diharapkan). Build dihentikan biar nggak ngerilis kernel dengan MHz salah."
+            grep -n -E "CPU_DVFS_(FREQ0_LL|VOLT0_VPROC1)" "$OPP_FILE" || true
+            exit 1
+          fi
 
       - name: Tampilkan diff hasil patch OC
         if: steps.oc.outputs.skip_oc == '0'
