@@ -133,21 +133,16 @@ jobs:
           FILE="sound/usb/card.h"
 
           # BUG NYATA: hunk yang nambahin field "stream_offset_adj" ke struct
-          # snd_usb_substream GAGAL apply (kena .rej), tapi hunk lain di
+          # gagal apply di file ini (struct udah beda), tapi hunk lain di
           # sound/usb/pcm.c yang MAKAI "subs->stream_offset_adj" BERHASIL
-          # apply. Hasilnya: field dipakai padahal nggak pernah dideklarasi
+          # nempel. Hasilnya field dipakai tapi nggak pernah dideklarasi
           # -> compile error "no member named 'stream_offset_adj'".
-          #
-          # Fix murni aditif: tambahin field itu persis setelah
-          # pkt_offset_adj, sama seperti upstream. Nggak nyentuh field lain
-          # (framesize/sample_rem/sample_accum/fps di snd_usb_endpoint)
-          # karena hunk penghapusnya JUGA gagal apply di tempat lain secara
-          # konsisten -- jadi kode lama yang masih makai field-field itu
-          # tetap aman/cocok, gak perlu ditambal.
+          # Fix: sisipkan field itu tepat setelah field lawas
+          # pkt_offset_adj, sama seperti upstream. Nggak nyentuh field lain.
           if grep -q "stream_offset_adj" "$FILE"; then
             echo "Field stream_offset_adj sudah ada, skip."
           elif grep -q "unsigned int pkt_offset_adj;" "$FILE"; then
-            sed -i '/unsigned int pkt_offset_adj;/a\	unsigned int stream_offset_adj;	/* Bytes to drop from beginning of stream (for non-compliant devices) */' "$FILE"
+            sed -i '/unsigned int pkt_offset_adj;/a\\tunsigned int stream_offset_adj;\t/* Bytes to drop from beginning of stream (for non-compliant devices) */' "$FILE"
             echo "Field stream_offset_adj ditambahin setelah pkt_offset_adj."
           else
             echo "::warning::Baris pkt_offset_adj nggak ketemu di $FILE -- kemungkinan struktur udah beda di level ini. Skip fix ini (bukan error fatal)."
@@ -371,6 +366,73 @@ jobs:
 
           echo "--- Cek ulang, harusnya masing-masing cuma 1x ---"
           grep -n "^static inline __must_check .* \(array_size\|array3_size\|__ab_c_size\)(" "$FILE" || true
+
+      - name: Fix drivers/hid/hid-core.c (fungsi kedobel)
+        run: |
+          FILE="drivers/hid/hid-core.c"
+
+          # Sama modus kayak overflow.h: hunk nempel sukses nambahin ulang
+          # fungsi hid_compute_report_size() yang ternyata udah ada duluan
+          # di file ini (vendor udah backport). Hasilnya "redefinition of
+          # 'hid_compute_report_size'" -- persis error yang bikin build
+          # gagal di step "drivers/hid". Dedup: sisain definisi PERTAMA aja.
+          if [ -f "$FILE" ]; then
+            COUNT=$(grep -c "^static size_t hid_compute_report_size(struct hid_report \*report)" "$FILE" || true)
+
+            if [ "$COUNT" -le 1 ]; then
+              echo "Cuma ada 1 (atau 0) definisi, sudah bersih. Skip."
+            else
+              python3 - "$FILE" <<'PYEOF'
+          import re
+          import sys
+
+          path = sys.argv[1]
+          with open(path) as f:
+              content = f.read()
+
+          pattern = re.compile(
+              r'^static size_t hid_compute_report_size\(struct hid_report \*report\)\s*\n\{',
+              re.MULTILINE,
+          )
+
+          matches = list(pattern.finditer(content))
+          spans_to_remove = []
+
+          for idx, m in enumerate(matches):
+              if idx == 0:
+                  continue
+              start = m.start()
+              brace_start = content.index('{', m.end() - 1)
+              depth = 0
+              i = brace_start
+              while i < len(content):
+                  if content[i] == '{':
+                      depth += 1
+                  elif content[i] == '}':
+                      depth -= 1
+                      if depth == 0:
+                          break
+                  i += 1
+              end = i + 1
+              if end < len(content) and content[end] == '\n':
+                  end += 1
+              spans_to_remove.append((start, end))
+
+          spans_to_remove.sort(reverse=True)
+          for start, end in spans_to_remove:
+              content = content[:start] + content[end:]
+
+          with open(path, "w") as f:
+              f.write(content)
+          print(f"{len(spans_to_remove)} definisi duplikat hid_compute_report_size dibuang.")
+          PYEOF
+            fi
+          else
+            echo "File $FILE nggak ada di level ini, skip."
+          fi
+
+          echo "--- Cek ulang, harusnya cuma 1x ---"
+          grep -n "^static size_t hid_compute_report_size" "$FILE" || true
 
       - name: Tentukan freq & volt OC dari preset
         id: oc
