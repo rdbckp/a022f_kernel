@@ -1,0 +1,188 @@
+name: a02_32_oc
+
+permissions:
+  contents: write
+
+on:
+  workflow_dispatch:
+
+env:
+  # CPU OC (freq dalam KHz, volt dalam satuan 10uV) - nilai step7 kurva Takumi123w/kernel-a01c
+  CPU_FREQ: "1801000"
+  CPU_VOLT: "130625"
+  OPP_FILE: drivers/misc/mediatek/base/power/cpufreq_v2/src/mach/mt6739/mtk_cpufreq_opp_table.h
+  # GPU OC (KHz) - OPP tertinggi tabel MT6739TW (aslinya 570000). Volt GPU tidak diubah.
+  GPU_FREQ: "624000"
+  GPU_FILE: drivers/misc/mediatek/base/power/mt6739/mtk_gpufreq.c
+  DEFCONFIG: arch/arm/configs/a02_32_defconfig
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Source Kernel
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.ref_name }}
+          fetch-depth: 1
+
+      - name: Install Toolchain & Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y bc build-essential flex bison libssl-dev libelf-dev xz-utils gcc-arm-linux-gnueabi
+
+      - name: Cek default governor CPU = performance
+        run: |
+          CFG="$DEFCONFIG"
+          if grep -q "^CONFIG_CPU_FREQ_DEFAULT_GOV_PERFORMANCE=y" "$CFG"; then
+            echo "OK: default governor CPU = performance"
+          else
+            echo "::error::$CFG belum set CONFIG_CPU_FREQ_DEFAULT_GOV_PERFORMANCE=y"
+            grep -n "CPU_FREQ_DEFAULT_GOV" "$CFG" || true
+            exit 1
+          fi
+
+      - name: Matikan CONFIG_SEC_LOG_HOOK_PMSG (biar nggak error undefined sec_log_hook_pmsg)
+        run: |
+          sed -i -E 's/^CONFIG_SEC_LOG_HOOK_PMSG=y/# CONFIG_SEC_LOG_HOOK_PMSG is not set/' "$DEFCONFIG"
+          grep -n "SEC_LOG_HOOK_PMSG" "$DEFCONFIG"
+          if grep -q "^CONFIG_SEC_LOG_HOOK_PMSG=y" "$DEFCONFIG"; then
+            echo "::error::CONFIG_SEC_LOG_HOOK_PMSG masih =y"
+            exit 1
+          fi
+
+      - name: Backup file asli (di luar tree, soalnya make mrproper hapus *.bak)
+        run: |
+          mkdir -p /tmp/bak
+          cp "$OPP_FILE" /tmp/bak/opp_table.h
+          cp "$GPU_FILE" /tmp/bak/mtk_gpufreq.c
+
+      - name: Patch OC CPU (freq & volt, tahan komentar apa pun)
+        run: |
+          for NAME in CPU_DVFS_FREQ0_LL_FY CPU_DVFS_FREQ0_LL_SB CPU_DVFS_FREQ0_LL_FY2; do
+            sed -i -E "s/^([[:space:]]*#define[[:space:]]+${NAME}[[:space:]]+)[0-9]+/\1${CPU_FREQ}/" "$OPP_FILE"
+          done
+          for NAME in CPU_DVFS_VOLT0_VPROC1_FY CPU_DVFS_VOLT0_VPROC1_SB CPU_DVFS_VOLT0_VPROC1_FY2; do
+            sed -i -E "s/^([[:space:]]*#define[[:space:]]+${NAME}[[:space:]]+)[0-9]+/\1${CPU_VOLT}/" "$OPP_FILE"
+          done
+
+          echo "--- Verifikasi nilai akhir ---"
+          FAIL=0
+          for NAME in CPU_DVFS_FREQ0_LL_FY CPU_DVFS_FREQ0_LL_SB CPU_DVFS_FREQ0_LL_FY2; do
+            VAL=$(grep -E "^[[:space:]]*#define[[:space:]]+${NAME}[[:space:]]" "$OPP_FILE" | head -1 | awk '{print $3}')
+            echo "$NAME = $VAL (target $CPU_FREQ)"
+            [ "$VAL" = "$CPU_FREQ" ] || FAIL=1
+          done
+          for NAME in CPU_DVFS_VOLT0_VPROC1_FY CPU_DVFS_VOLT0_VPROC1_SB CPU_DVFS_VOLT0_VPROC1_FY2; do
+            VAL=$(grep -E "^[[:space:]]*#define[[:space:]]+${NAME}[[:space:]]" "$OPP_FILE" | head -1 | awk '{print $3}')
+            echo "$NAME = $VAL (target $CPU_VOLT)"
+            [ "$VAL" = "$CPU_VOLT" ] || FAIL=1
+          done
+
+          if [ "$FAIL" -eq 1 ]; then
+            echo "::error::Patch OC CPU nggak kena (nama macro/format di $OPP_FILE beda). Build dihentikan biar nggak ngerilis kernel dengan MHz salah."
+            grep -n -E "CPU_DVFS_(FREQ0_LL|VOLT0_VPROC1)" "$OPP_FILE" || true
+            exit 1
+          fi
+
+      - name: Patch OC GPU 624 MHz + governor GPU performance
+        run: |
+          # 1) OPP tertinggi tabel TW: 570000 -> 624000
+          sed -i -E "s/^([[:space:]]*#define[[:space:]]+GPU_DVFS_FREQ0_6739TW[[:space:]]+)\(?[0-9]+\)?/\1(${GPU_FREQ})/" "$GPU_FILE"
+
+          # 2) Governor GPU default "performance" = selalu keep max OPP (sama efeknya kayak echo 0 > /proc/gpufreq/gpufreq_state)
+          #    Thermal limit (g_limited_max_id) tetap jalan, jadi masih ada proteksi panas.
+          sed -i -E "s/^(static bool mt_gpufreq_keep_max_frequency_state)[[:space:]]*(=[[:space:]]*[A-Za-z0-9]+)?[[:space:]]*;/\1 = true;/" "$GPU_FILE"
+
+          echo "--- Verifikasi GPU ---"
+          FAIL=0
+          VAL=$(grep -E "^[[:space:]]*#define[[:space:]]+GPU_DVFS_FREQ0_6739TW[[:space:]]" "$GPU_FILE" | head -1 | sed -E 's/.*GPU_DVFS_FREQ0_6739TW[[:space:]]+\(?([0-9]+)\)?.*/\1/')
+          echo "GPU_DVFS_FREQ0_6739TW = $VAL (target $GPU_FREQ)"
+          [ "$VAL" = "$GPU_FREQ" ] || FAIL=1
+
+          if grep -qE "^static bool mt_gpufreq_keep_max_frequency_state = true;" "$GPU_FILE"; then
+            echo "keep_max_frequency_state default = true (GPU governor performance)"
+          else
+            echo "keep_max_frequency_state TIDAK ke-patch"
+            FAIL=1
+          fi
+
+          if [ "$FAIL" -eq 1 ]; then
+            echo "::error::Patch OC GPU nggak kena (format di $GPU_FILE beda). Build dihentikan."
+            grep -n -E "GPU_DVFS_FREQ0_6739TW|keep_max_frequency_state" "$GPU_FILE" || true
+            exit 1
+          fi
+
+      - name: Tampilkan diff hasil patch
+        run: |
+          git diff --stat || true
+          diff -u /tmp/bak/opp_table.h "$OPP_FILE" || true
+          diff -u /tmp/bak/mtk_gpufreq.c "$GPU_FILE" || true
+
+      - name: Build Kernel
+        run: |
+          chmod +x z32
+          chmod +x -R toolchain
+          ./z32
+
+      - name: Upload build.log kalau gagal
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log-run${{ github.run_number }}
+          path: build.log
+          if-no-files-found: ignore
+
+      - name: Package boot.img-kernel
+        run: |
+          cd out/arch/arm/boot
+          if [ -f "zImage-dtb" ]; then
+            cp zImage-dtb boot.img-kernel
+          else
+            echo "::warning::zImage-dtb tidak ditemukan, fallback ke zImage (DTB terpisah)."
+            cp zImage boot.img-kernel
+          fi
+          ls -l boot.img-kernel
+
+      - name: Zip release
+        run: |
+          mkdir -p /tmp/release
+          ZIP_NAME="RooXie-32-OC-cpu1801-gpu624-run${GITHUB_RUN_NUMBER}.zip"
+          cp out/arch/arm/boot/boot.img-kernel /tmp/release/boot.img-kernel
+          {
+            echo "Kernel Samsung A022F 32-bit (tanpa upstream)"
+            echo "Tanggal build : $(date -u '+%Y-%m-%d %H:%M UTC')"
+            echo "CPU OC        : ${CPU_FREQ} KHz @ ${CPU_VOLT} (10uV)"
+            echo "GPU OC        : ${GPU_FREQ} KHz (volt tetap)"
+            echo "CPU governor  : performance (default)"
+            echo "GPU governor  : performance (keep max OPP, thermal limit tetap aktif)"
+            echo "Branch        : ${GITHUB_REF_NAME}"
+            echo "Commit        : ${GITHUB_SHA}"
+            echo "Workflow run  : #${GITHUB_RUN_NUMBER}"
+          } > /tmp/release/OC_INFO.txt
+          (cd /tmp/release && zip -j "$ZIP_NAME" boot.img-kernel OC_INFO.txt)
+          ls -l "/tmp/release/$ZIP_NAME"
+          echo "ZIP_NAME=$ZIP_NAME" >> "$GITHUB_ENV"
+          {
+            echo "Kernel Samsung A022F 32-bit - OC CPU ${CPU_FREQ} KHz + GPU ${GPU_FREQ} KHz"
+            echo ""
+            echo "- Isi zip: boot.img-kernel + OC_INFO.txt"
+            echo "- Build: workflow run #${GITHUB_RUN_NUMBER}"
+          } > /tmp/release/notes.md
+
+      - name: Upload Kernel (artifact)
+        uses: actions/upload-artifact@v4
+        with:
+          name: RooXie-32-OC-run${{ github.run_number }}
+          path: /tmp/release/${{ env.ZIP_NAME }}
+
+      - name: Publish ke GitHub Releases
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="32oc-cpu1801-gpu624-r${GITHUB_RUN_NUMBER}-${GITHUB_RUN_ATTEMPT}"
+          gh release create "$TAG" "/tmp/release/${ZIP_NAME}" \
+            --repo "$GITHUB_REPOSITORY" \
+            --target "$GITHUB_SHA" \
+            --title "RooXie 32-bit OC CPU ${CPU_FREQ} KHz + GPU ${GPU_FREQ} KHz (run #${GITHUB_RUN_NUMBER})" \
+            --notes-file /tmp/release/notes.md
