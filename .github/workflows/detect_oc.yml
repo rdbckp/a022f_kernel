@@ -1,0 +1,126 @@
+name: Detect OC Files (CPU + GPU) -> pack ke Release
+
+permissions:
+  contents: write
+
+on:
+  workflow_dispatch:
+
+jobs:
+  detect:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Source Kernel
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.ref_name }}
+          fetch-depth: 20
+
+      - name: Deteksi & kumpulin file OC
+        run: |
+          PACK=/tmp/oc_pack
+          rm -rf "$PACK"; mkdir -p "$PACK/files"
+          MANIFEST="$PACK/MANIFEST.txt"; : > "$MANIFEST"
+          SKIPPED="$PACK/SKIPPED.txt";   : > "$SKIPPED"
+          MAX_BYTES=819200   # file > 800KB dilewati
+
+          # path khusus SoC lain (mtXXXX selain mt6739) dilewati biar arsip nggak bengkak
+          soc_ok() {
+            if echo "$1" | grep -Eq 'mt6739|k39|a02'; then return 0; fi
+            if echo "$1" | grep -Eq 'mt[0-9]{4}'; then return 1; fi
+            return 0
+          }
+
+          add() {  # add <path> <alasan>
+            local f="$1"
+            [ -f "$f" ] || return 0
+            if ! soc_ok "$f"; then return 0; fi
+            if [ "$(stat -c%s "$f")" -gt "$MAX_BYTES" ]; then echo "BESAR  $f" >> "$SKIPPED"; return 0; fi
+            grep -Iq . "$f" || { echo "BINER/KOSONG $f" >> "$SKIPPED"; return 0; }
+            mkdir -p "$PACK/files/$(dirname "$f")"
+            cp -n "$f" "$PACK/files/$f"
+            echo "$2 | $f" >> "$MANIFEST"
+          }
+
+          add_dir() {  # add_dir <dir> <alasan>
+            [ -d "$1" ] || return 0
+            find "$1" -type f \( -name '*.c' -o -name '*.h' -o -name 'Makefile' -o -name 'Kconfig' -o -name '*.mk' -o -name '*.dts' -o -name '*.dtsi' -o -name '*.txt' \) | sort | while IFS= read -r f; do
+              add "$f" "$2"
+            done
+          }
+
+          EXCL=(--exclude-dir=.git --exclude-dir=out --exclude-dir=toolchain)
+
+          echo "=== CPU ==="
+          add_dir drivers/misc/mediatek/base/power/cpufreq_v2 "CPU:cpufreq_v2"
+          grep -rIlE "${EXCL[@]}" 'CPU_DVFS_FREQ0_LL_FY|CPU_DVFS_VOLT0_VPROC1_FY' drivers arch include 2>/dev/null | while IFS= read -r f; do add "$f" "CPU:macro-opp"; done
+          find drivers/misc/mediatek -type f \( -iname '*cpufreq*' -o -iname '*cpu_dvfs*' \) 2>/dev/null | while IFS= read -r f; do add "$f" "CPU:nama-file"; done
+
+          echo "=== GPU ==="
+          find drivers/misc/mediatek -type d -name ged 2>/dev/null | while IFS= read -r d; do add_dir "$d" "GPU:ged"; done
+          find drivers/misc/mediatek -type f \( -iname '*gpufreq*' -o -iname '*gpu_dvfs*' -o -iname '*mtk_gpu*' -o -iname '*ged_*' \) 2>/dev/null | while IFS= read -r f; do add "$f" "GPU:nama-file"; done
+          grep -rIlE "${EXCL[@]}" 'mt_gpufreq|mtk_gpufreq|g_cur_opp_freq|gpu_max_clock|gpu_min_clock|ged_dvfs|GED_GPU|GPU_DVFS|gpufreq_opp|mtk_gpu_utility|MTKRGX|MTKFreqInit' drivers/misc/mediatek include arch/arm/boot/dts 2>/dev/null | while IFS= read -r f; do add "$f" "GPU:isi-file"; done
+
+          echo "=== DTS ==="
+          find arch/arm/boot/dts -type f \( -name '*mt6739*' -o -name '*k39*' -o -name '*a02*' \) 2>/dev/null | while IFS= read -r f; do add "$f" "DTS"; done
+          grep -rIlE 'rgx|gpu|mali|gpufreq|cpu-opp|operating-points' arch/arm/boot/dts 2>/dev/null | while IFS= read -r f; do
+            if echo "$f" | grep -Eq 'mt6739|k39|a02'; then add "$f" "DTS:gpu/cpu-node"; fi
+          done
+
+          echo "=== Config & build ==="
+          for f in arch/arm/configs/a02*; do add "$f" "CONFIG"; done
+          add Makefile "BUILD:Makefile-utama"
+          add z32 "BUILD:script"; add z "BUILD:script"
+          add arch/arm/boot/Makefile "BUILD:zImage-dtb-rule"
+          add drivers/cpufreq/Kconfig "CPUFREQ:Kconfig"
+
+          echo "=== Laporan ==="
+          {
+            echo "## Versi kernel"; head -n 8 Makefile
+            echo; echo "## git log -10"; git log -n 10 --format='%h %ad %s' --date=short
+            echo; echo "## config a02*"; ls -l arch/arm/configs | grep a02
+            echo; echo "## Kandidat folder GPU/CPU/DVFS"
+            find drivers/misc/mediatek arch/arm/boot/dts -type d \( -iname '*gpu*' -o -iname '*ged*' -o -iname '*cpufreq*' -o -iname '*dvfs*' -o -iname '*rgx*' \) 2>/dev/null | sort
+          } > "$PACK/KERNEL_INFO.txt"
+
+          sort -u "$MANIFEST" -o "$MANIFEST"
+
+          {
+            echo "## Makro OPP CPU mt6739"
+            grep -rnE 'CPU_DVFS_(FREQ|VOLT)0' drivers/misc/mediatek/base/power/cpufreq_v2/src/mach/mt6739 2>/dev/null
+            echo
+            echo "## Kata kunci GPU (di file yang terkumpul)"
+            (cd "$PACK/files" && grep -rnE 'gpu_max_clock|gpu_min_clock|governor|GPU_DVFS|g_cur_opp|opp_tbl|OPP_TBL|ged_dvfs_|MAX_FREQ|freq_table|0x[0-9a-fA-F]*GPU|[^0-9]624000|[^0-9]570000|[^0-9]546000|[^0-9]390000' . | head -n 800)
+          } > "$PACK/GREP_HITS.txt"
+
+          echo "--- Ringkasan ---"
+          echo "File terkumpul : $(wc -l < "$MANIFEST")"
+          echo "File dilewati  : $(wc -l < "$SKIPPED")"
+          cut -d'|' -f1 "$MANIFEST" | sort | uniq -c
+
+          cd /tmp
+          tar czf oc_files.tar.gz oc_pack
+          (cd /tmp && zip -rq oc_files.zip oc_pack)
+          ls -lh /tmp/oc_files.tar.gz /tmp/oc_files.zip
+          SIZE=$(stat -c%s /tmp/oc_files.zip)
+          if [ "$SIZE" -gt 26214400 ]; then
+            echo "::warning::Arsip $((SIZE/1048576))MB, mungkin kegedean buat di-upload ke chat. Cek SKIPPED.txt / kecilkan MAX_BYTES."
+          fi
+
+      - name: Publish ke GitHub Releases
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="oc-detect-r${GITHUB_RUN_NUMBER}-${GITHUB_RUN_ATTEMPT}"
+          {
+            echo "Paket deteksi OC (CPU + GPU) - branch ${GITHUB_REF_NAME}, commit ${GITHUB_SHA}"
+            echo ""
+            echo "- oc_files.zip / oc_files.tar.gz isinya sama"
+            echo "- Mulai dari oc_pack/MANIFEST.txt, KERNEL_INFO.txt, GREP_HITS.txt"
+          } > /tmp/notes.md
+          gh release create "$TAG" /tmp/oc_files.zip /tmp/oc_files.tar.gz \
+            --repo "$GITHUB_REPOSITORY" \
+            --target "$GITHUB_SHA" \
+            --prerelease \
+            --title "OC detect pack (run #${GITHUB_RUN_NUMBER})" \
+            --notes-file /tmp/notes.md
