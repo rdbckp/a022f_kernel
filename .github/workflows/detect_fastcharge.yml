@@ -1,0 +1,154 @@
+name: Detect Fast Charging Files (charger/battery/PMIC) -> pack ke Release
+
+permissions:
+  contents: write
+
+on:
+  workflow_dispatch:
+
+jobs:
+  detect:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Source Kernel
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.ref_name }}
+          fetch-depth: 20
+
+      - name: Deteksi & kumpulin file charging
+        run: |
+          PACK=/tmp/fc_pack
+          rm -rf "$PACK"; mkdir -p "$PACK/files"
+          MANIFEST="$PACK/MANIFEST.txt"; : > "$MANIFEST"
+          SKIPPED="$PACK/SKIPPED.txt";   : > "$SKIPPED"
+          MAX_BYTES=819200   # file > 800KB dilewati
+          DEFCFG="arch/arm/configs/a02_32_defconfig"
+
+          # path khusus SoC lain (mtXXXX selain mt6739) dilewati biar arsip nggak bengkak
+          soc_ok() {
+            if echo "$1" | grep -Eq 'mt6739|k39|a02'; then return 0; fi
+            if echo "$1" | grep -Eq 'mt[0-9]{4}'; then return 1; fi
+            return 0
+          }
+
+          add() {  # add <path> <alasan>
+            local f="$1"
+            [ -f "$f" ] || return 0
+            if ! soc_ok "$f"; then return 0; fi
+            if [ "$(stat -c%s "$f")" -gt "$MAX_BYTES" ]; then echo "BESAR  $f" >> "$SKIPPED"; return 0; fi
+            grep -Iq . "$f" || { echo "BINER/KOSONG $f" >> "$SKIPPED"; return 0; }
+            mkdir -p "$PACK/files/$(dirname "$f")"
+            cp -n "$f" "$PACK/files/$f"
+            echo "$2 | $f" >> "$MANIFEST"
+          }
+
+          add_dir() {  # add_dir <dir> <alasan>
+            [ -d "$1" ] || return 0
+            find "$1" -type f \( -name '*.c' -o -name '*.h' -o -name 'Makefile' -o -name 'Kconfig' -o -name '*.mk' -o -name '*.dts' -o -name '*.dtsi' -o -name '*.txt' \) | sort | while IFS= read -r f; do
+              add "$f" "$2"
+            done
+          }
+
+          EXCL=(--exclude-dir=.git --exclude-dir=out --exclude-dir=toolchain)
+          # folder yang relevan buat charging (yang nggak ada otomatis dilewati)
+          SRC="drivers/power drivers/battery drivers/battery_v2 drivers/misc/mediatek drivers/usb drivers/mfd drivers/regulator drivers/i2c drivers/misc include arch/arm/boot/dts"
+          EXSRC=""
+          for d in $SRC; do [ -d "$d" ] && EXSRC="$EXSRC $d"; done
+
+          echo "=== Folder charger/battery ==="
+          find $EXSRC -type d \( -iname '*charger*' -o -iname '*charging*' -o -iname '*battery*' -o -iname 'pe' -o -iname 'pe20' -o -iname 'pe40' -o -iname 'pd' -o -iname 'typec*' -o -iname '*sec_*' -o -iname 'pmic*' -o -iname '*bat_*' \) \
+            -not -path '*/.git/*' -not -path '*/out/*' -not -path '*/toolchain/*' 2>/dev/null | sort | while IFS= read -r d; do
+              add_dir "$d" "CHG:folder"
+          done
+
+          echo "=== File berdasarkan nama ==="
+          find $EXSRC -type f \( -iname '*charger*' -o -iname '*charging*' -o -iname '*battery*' -o -iname '*_chg*' -o -iname '*chg_*' -o -iname '*switch_chr*' -o -iname '*mtk_pe*' -o -iname '*pdc*' -o -iname '*sec_bat*' -o -iname '*sec_chg*' -o -iname '*siop*' -o -iname '*afc*' -o -iname '*muic*' -o -iname '*bq2*' -o -iname '*rt9*' -o -iname '*sm5*' -o -iname '*fuelgauge*' -o -iname '*fg_*' \) \
+            \( -name '*.c' -o -name '*.h' -o -name '*.dts' -o -name '*.dtsi' -o -name 'Makefile' -o -name 'Kconfig' \) \
+            -not -path '*/.git/*' -not -path '*/out/*' -not -path '*/toolchain/*' 2>/dev/null | while IFS= read -r f; do
+              add "$f" "CHG:nama-file"
+          done
+
+          echo "=== File berdasarkan isi (kata kunci arus/volt charging) ==="
+          KEY='CHARGING_CURRENT|charging_current|charger_current|input_current|ac_charger_current|usb_charger_current|ac_charger_input_current|charging_host_input|fast_charging|fast_charge|FAST_CHG|max_charger_voltage|battery_cv|BATTERY_CV|cv_voltage|constant_voltage|AC_CHARGER_CURRENT|USB_CHARGER_CURRENT|NONSTD_CHARGER|STANDARD_CHARGER|pe_ta|pe20|pe40|PUMPEX|mtk_pe|AFC|afc_|sec,battery|sec,charger|sec_battery|sec_charger|siop|SIOP|charging_current_table|cable_info|temp_check_type|swchg|SWITCH_CHARGING|switch_charging|chr_type|CHARGER_UNKNOWN|STANDARD_HOST|CHARGING_HOST|DCP|set_chr_current|chr_control_interface|mtk_chr_|bq25|rt9467|rt9471|sm5714|sm5703|sm5720|sgm4|mt6357|mt6358|mt6392|pmic_chrdet'
+          grep -rIlE "${EXCL[@]}" "$KEY" $EXSRC 2>/dev/null | while IFS= read -r f; do
+            case "$f" in
+              *.c|*.h|*.dts|*.dtsi|*Makefile|*Kconfig) add "$f" "CHG:isi-file" ;;
+            esac
+          done
+
+          echo "=== DTS (node charger/battery) ==="
+          find arch/arm/boot/dts -type f \( -name '*mt6739*' -o -name '*k39*' -o -name '*a02*' \) 2>/dev/null | while IFS= read -r f; do add "$f" "DTS"; done
+          grep -rIlE 'charger|battery|charging|fuelgauge|fuel_gauge|muic|pmic|typec|usb' arch/arm/boot/dts 2>/dev/null | while IFS= read -r f; do
+            if echo "$f" | grep -Eq 'mt6739|k39|a02|bat_setting'; then add "$f" "DTS:charger-node"; fi
+          done
+          # sub-folder bat_setting & samsung/a02 (battery_prop, battery_table, pm_common, dsb)
+          add_dir arch/arm/boot/dts/bat_setting "DTS:bat_setting"
+          add_dir arch/arm/boot/dts/samsung/a02 "DTS:samsung-a02"
+
+          echo "=== Config & build ==="
+          for f in arch/arm/configs/a02*; do add "$f" "CONFIG"; done
+          add Makefile "BUILD:Makefile-utama"
+          add z32 "BUILD:script"; add z "BUILD:script"
+          add drivers/power/Kconfig "POWER:Kconfig"
+          add drivers/power/supply/Kconfig "POWER:Kconfig-supply"
+          add drivers/power/supply/Makefile "POWER:Makefile-supply"
+          add drivers/misc/mediatek/Makefile "MTK:Makefile"
+          add drivers/misc/mediatek/Kconfig "MTK:Kconfig"
+
+          echo "=== Laporan ==="
+          {
+            echo "## Versi kernel"; head -n 8 Makefile
+            echo; echo "## git log -10"; git log -n 10 --format='%h %ad %s' --date=short
+            echo; echo "## config a02*"; ls -l arch/arm/configs | grep a02
+            echo; echo "## CONFIG terkait charging di $DEFCFG"
+            grep -nE 'CHARG|BATTERY|BATT|FUELGAUGE|FUEL_GAUGE|PMIC|MUIC|AFC|TYPEC|USB_.*PD|MTK_PUMP|PUMP_EXPRESS|SIOP|SEC_|MTK_SMART_BATTERY|POWER_SUPPLY|MTK_PMIC|MTK_USB' "$DEFCFG" | grep -v 'CONFIG_SND' | head -n 300
+            echo; echo "## Kandidat folder charger/battery/PMIC"
+            find $EXSRC -type d \( -iname '*charg*' -o -iname '*batter*' -o -iname '*pmic*' -o -iname '*typec*' -o -iname '*muic*' -o -iname '*fuelgauge*' -o -iname 'pe*' -o -iname 'pd' \) \
+              -not -path '*/.git/*' -not -path '*/out/*' -not -path '*/toolchain/*' 2>/dev/null | sort
+          } > "$PACK/KERNEL_INFO.txt"
+
+          sort -u "$MANIFEST" -o "$MANIFEST"
+
+          {
+            echo "## Makro/nilai arus & volt charging (di file yang terkumpul)"
+            (cd "$PACK/files" && grep -rnE 'AC_CHARGER_CURRENT|USB_CHARGER_CURRENT|AC_CHARGER_INPUT_CURRENT|USB_CHARGER_INPUT|NON_STD_AC_CHARGER_CURRENT|STANDARD_CHARGER_CURRENT|CHARGING_HOST_CURRENT|ac_charger_current|usb_charger_current|ac_charger_input_current|charging_host_input_current|battery_cv|BATTERY_CV|max_charger_voltage|MAX_CHARGER_VOLTAGE|constant_voltage|cv_voltage|input_current_limit|charging_current|input_current|fast_charging|pe_ta|pe20|pe40|PUMPEX|chg_current|chr_current|AFC|afc_' . | head -n 1200)
+            echo
+            echo "## Kata kunci SIOP / throttle / thermal charging"
+            (cd "$PACK/files" && grep -rnE 'siop|SIOP|temp_check|high_temp|chg_temp|charging_limit|current_limit|thermal.*chg|chg.*thermal|aicl|AICL|ibus|IBUS|ichg|ICHG' . | head -n 600)
+            echo
+            echo "## Driver charger IC / PMIC yang ke-compile (cek Makefile/DTS)"
+            (cd "$PACK/files" && grep -rnE 'compatible *=.*(charger|chg|bq2|rt9|sm5|mt63|sgm|fuel|muic)' . | head -n 200)
+          } > "$PACK/GREP_HITS.txt"
+
+          echo "--- Ringkasan ---"
+          echo "File terkumpul : $(wc -l < "$MANIFEST")"
+          echo "File dilewati  : $(wc -l < "$SKIPPED")"
+          cut -d'|' -f1 "$MANIFEST" | sort | uniq -c
+
+          cd /tmp
+          tar czf fc_files.tar.gz fc_pack
+          (cd /tmp && zip -rq fc_files.zip fc_pack)
+          ls -lh /tmp/fc_files.tar.gz /tmp/fc_files.zip
+          SIZE=$(stat -c%s /tmp/fc_files.zip)
+          if [ "$SIZE" -gt 26214400 ]; then
+            echo "::warning::Arsip $((SIZE/1048576))MB, mungkin kegedean buat di-upload ke chat. Cek SKIPPED.txt / kecilkan MAX_BYTES."
+          fi
+
+      - name: Publish ke GitHub Releases
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="fc-detect-r${GITHUB_RUN_NUMBER}-${GITHUB_RUN_ATTEMPT}"
+          {
+            echo "Paket deteksi Fast Charging - branch ${GITHUB_REF_NAME}, commit ${GITHUB_SHA}"
+            echo ""
+            echo "- fc_files.zip / fc_files.tar.gz isinya sama"
+            echo "- Mulai dari fc_pack/MANIFEST.txt, KERNEL_INFO.txt, GREP_HITS.txt"
+          } > /tmp/notes.md
+          gh release create "$TAG" /tmp/fc_files.zip /tmp/fc_files.tar.gz \
+            --repo "$GITHUB_REPOSITORY" \
+            --target "$GITHUB_SHA" \
+            --prerelease \
+            --title "Fast charging detect pack (run #${GITHUB_RUN_NUMBER})" \
+            --notes-file /tmp/notes.md
